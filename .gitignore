@@ -1,0 +1,7 @@
+node_modules/
+dist/
+data/
+.env
+open-claw.config.yaml
+*.log
+.DS_Store

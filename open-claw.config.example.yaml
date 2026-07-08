@@ -1,0 +1,39 @@
+# open-claw source configuration.
+#
+# Each entry under `sources` is one integration instance. You can run several
+# instances of the same type (e.g. multiple GitHub repos), each with its own
+# `id` (must be unique). Secrets are NOT stored here — reference them as
+# ${ENV_VAR} and keep the actual values in .env / the environment.
+#
+# Copy this file to open-claw.config.yaml and edit. Override the path with the
+# OPEN_CLAW_CONFIG env var.
+
+sources:
+  # ── Telegram: a long-polling bot that runs free-form tasks on this machine ──
+  - type: telegram
+    id: tg-main
+    botToken: ${TELEGRAM_BOT_TOKEN}      # value lives in .env
+    allowedUserIds: [123456789]          # your numeric Telegram id(s)
+    # workspaceRoot: /path/to/projects   # optional; defaults to AGENT_WORKSPACE_ROOT
+
+  # ── GitHub: polls a repo and acts on labelled issues ──
+  - type: github
+    id: goals-app
+    repo: owner/goals-app
+    labels: { bug: bug, feature: enhancement, question: question }
+    pollIntervalSec: 120
+    autoMerge: false                     # auto-merge green PRs that pass the policy
+    cloneDir: ./data/repos
+    policy:
+      allowedGlobs: [src/**, public/**, docs/**]
+      maxChangedLines: 300
+
+  # ── A second GitHub repo = just another instance ──
+  - type: github
+    id: other-app
+    repo: owner/other-app
+    labels: { bug: bug, feature: enhancement, question: question }
+    autoMerge: true
+    policy:
+      allowedGlobs: [app/**, lib/**]
+      maxChangedLines: 150
