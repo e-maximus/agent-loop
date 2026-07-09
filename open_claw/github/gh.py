@@ -43,6 +43,11 @@ class IssueComment:
     author: str
     body: str
     created_at: str  # ISO 8601
+    # Set for inline PR review comments so the agent knows which file/line the
+    # feedback is anchored to (empty for timeline/issue comments).
+    path: str = ""
+    line: int | None = None
+    diff_hunk: str = ""
 
 
 @dataclass
@@ -267,21 +272,27 @@ async def pr_comments(repo: str, pr_number: int) -> list[IssueComment]:
     a bare 'Commented' review) are dropped."""
     out: list[IssueComment] = []
 
-    async def _collect(path: str, ts_field: str) -> None:
-        res = await run("gh", ["api", path, "--paginate"], throw_on_error=False)
+    async def _collect(api_path: str, ts_field: str, inline: bool = False) -> None:
+        res = await run("gh", ["api", api_path, "--paginate"], throw_on_error=False)
         if res.code != 0:
             return
         for c in json.loads(res.stdout or "[]"):
             body = c.get("body") or ""
-            if body.strip():
-                out.append(IssueComment(
-                    author=(c.get("user") or {}).get("login", "unknown"),
-                    body=body,
-                    created_at=c.get(ts_field) or "",
-                ))
+            if not body.strip():
+                continue
+            out.append(IssueComment(
+                author=(c.get("user") or {}).get("login", "unknown"),
+                body=body,
+                created_at=c.get(ts_field) or "",
+                # Inline review comments carry the file/line + hunk they anchor
+                # to; keep it so rework edits the exact spot, not a guess.
+                path=c.get("path", "") if inline else "",
+                line=(c.get("line") or c.get("original_line")) if inline else None,
+                diff_hunk=c.get("diff_hunk", "") if inline else "",
+            ))
 
     await _collect(f"repos/{repo}/issues/{pr_number}/comments", "created_at")
-    await _collect(f"repos/{repo}/pulls/{pr_number}/comments", "created_at")
+    await _collect(f"repos/{repo}/pulls/{pr_number}/comments", "created_at", inline=True)
     await _collect(f"repos/{repo}/pulls/{pr_number}/reviews", "submitted_at")
     out.sort(key=lambda c: c.created_at)
     return out
@@ -316,6 +327,17 @@ async def pr_review_decision(repo: str, pr_number: int) -> str:
     if "APPROVED" in states:
         return "approved"
     return "none"
+
+
+async def pr_labels(repo: str, pr_number: int) -> list[str]:
+    res = await run(
+        "gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "labels"],
+        throw_on_error=False,
+    )
+    if res.code != 0:
+        return []
+    data = json.loads(res.stdout or "{}")
+    return [l["name"] for l in (data.get("labels") or [])]
 
 
 async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:

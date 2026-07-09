@@ -113,15 +113,17 @@ agent's word:
 - **CI red** → it re-runs the failed jobs **once** (this alone clears most
   `cancelled`/flaky failures). If CI is still red after that single re-run, the
   PR is handed off to a human.
-- **A human review comment** → the comment is classified as a **question**
+- **Human review comments** → all new comments are classified as a **question**
   (answered on the PR, grounded in the branch code) or a **change request** (the
   task goes back into **rework** — the agent amends the same PR branch and
-  pushes). CI need not be green for this.
+  pushes). Inline comments keep their **file/line anchor** so the fix lands where
+  the comment points. CI need not be green for this.
 - **CI green** → if `autoMerge: true`, the diff passes the **blast-radius
   policy** (`policy.allowedGlobs` + `policy.maxChangedLines`), **and** (unless
-  `requireApproval: false`) the PR has an approving review with no outstanding
-  "changes requested", it squash-merges. Otherwise it keeps waiting / leaves the
-  PR for review.
+  `requireApproval: false`) the PR is **approved** — the `approveLabel` label is
+  present (GitHub blocks approving your own PR, so a label is how the author
+  signs off) or a different reviewer approved — it squash-merges. Otherwise it
+  keeps waiting / leaves the PR for review.
 
 **The target repo must have a PR CI workflow that runs the same lint/build/e2e**
 — the local verify run is a fast pre-check, the CI run is the authoritative gate

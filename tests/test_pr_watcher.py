@@ -114,10 +114,35 @@ async def test_new_human_comment_queues_rework(monkeypatch):
     meta = row.meta_dict()
     assert row.status == "queued"                   # handed to a worker
     assert meta["mode"] == "pr_reply"
-    assert meta["feedback"] == "Please rename the button"
+    assert "Please rename the button" in meta["feedback"]
     assert meta["prReviewedThrough"] == "2024-06-01T10:00:00Z"
     assert q.pokes == 1
     assert len(comment_pr.calls) == 1
+
+
+async def test_all_new_comments_handled_with_anchors(monkeypatch):
+    # Several new comments at once: none is dropped, and inline anchors survive.
+    tid = make_pr_task(prReviewedThrough="2020-01-01T00:00:00Z")
+    watcher = mw.PrWatcher(make_cfg(auto_merge=True), DummyQueue())
+    patch(
+        monkeypatch,
+        pr_checks_state=make_async("success"),
+        pr_comments=make_async([
+            IssueComment(author="a", body="revert these lines", created_at="2024-06-01T10:00:00Z",
+                         path="e2e/version.spec.ts", line=8, diff_hunk="@@ -1 +8 @@"),
+            IssueComment(author="a", body="rename just the test name", created_at="2024-06-01T11:00:00Z",
+                         path="e2e/version.spec.ts", line=3),
+        ]),
+        comment_pr=make_async(None),
+    )
+
+    await watcher._tick()
+
+    fb = tasks.get(tid).meta_dict()["feedback"]
+    assert "revert these lines" in fb and "rename just the test name" in fb   # both kept
+    assert "e2e/version.spec.ts" in fb and "line 3" in fb and "line 8" in fb  # anchored
+    # cursor advanced to the newest of the batch
+    assert tasks.get(tid).meta_dict()["prReviewedThrough"] == "2024-06-01T11:00:00Z"
 
 
 async def test_bot_comment_is_ignored(monkeypatch):
@@ -141,7 +166,7 @@ async def test_bot_comment_is_ignored(monkeypatch):
     assert q.pokes == 0
 
 
-async def test_green_approved_within_policy_merges(monkeypatch):
+async def test_label_approves_and_merges(monkeypatch):
     tid = make_pr_task()
     watcher = mw.PrWatcher(make_cfg(auto_merge=True), DummyQueue())
     merge = make_async(None)
@@ -149,7 +174,7 @@ async def test_green_approved_within_policy_merges(monkeypatch):
         monkeypatch,
         pr_checks_state=make_async("success"),
         pr_comments=make_async([]),
-        pr_review_decision=make_async("approved"),
+        pr_labels=make_async(["auto-merge"]),           # owner labelled → approved
         pr_changed_files=make_async([ChangedFile(file="src/app.ts", added=3, deleted=1)]),
         merge_pr=merge,
         comment_issue=make_async(None),
@@ -158,8 +183,28 @@ async def test_green_approved_within_policy_merges(monkeypatch):
     await watcher._tick()
 
     row = tasks.get(tid)
-    assert row.status == "done"                     # merge closes the task
+    assert row.status == "done"
     assert row.meta_dict()["prState"] == "merged"
+    assert len(merge.calls) == 1
+
+
+async def test_review_approval_also_merges(monkeypatch):
+    tid = make_pr_task()
+    watcher = mw.PrWatcher(make_cfg(auto_merge=True), DummyQueue())
+    merge = make_async(None)
+    patch(
+        monkeypatch,
+        pr_checks_state=make_async("success"),
+        pr_comments=make_async([]),
+        pr_labels=make_async([]),                       # no label…
+        pr_review_decision=make_async("approved"),      # …but a reviewer approved
+        pr_changed_files=make_async([ChangedFile(file="src/app.ts", added=3, deleted=1)]),
+        merge_pr=merge,
+        comment_issue=make_async(None),
+    )
+
+    await watcher._tick()
+    assert tasks.get(tid).status == "done"
     assert len(merge.calls) == 1
 
 
@@ -171,32 +216,17 @@ async def test_green_but_not_approved_waits(monkeypatch):
         monkeypatch,
         pr_checks_state=make_async("success"),
         pr_comments=make_async([]),
-        pr_review_decision=make_async("none"),      # nobody approved yet
+        pr_labels=make_async([]),                       # no label
+        pr_review_decision=make_async("none"),          # nobody approved yet
         merge_pr=merge,
     )
 
     await watcher._tick()
 
-    # Green CI is not enough without an approval → keep waiting, no handoff.
+    # Green CI is not enough without approval → keep waiting, no handoff.
     assert len(merge.calls) == 0
     assert tasks.get(tid).status == "awaiting_review"
     assert tasks.get(tid).meta_dict().get("prState") == "open"
-
-
-async def test_changes_requested_blocks_merge(monkeypatch):
-    tid = make_pr_task()
-    watcher = mw.PrWatcher(make_cfg(auto_merge=True), DummyQueue())
-    merge = make_async(None)
-    patch(
-        monkeypatch,
-        pr_checks_state=make_async("success"),
-        pr_comments=make_async([]),
-        pr_review_decision=make_async("changes_requested"),
-        merge_pr=merge,
-    )
-
-    await watcher._tick()
-    assert len(merge.calls) == 0
 
 
 async def test_approval_not_required_merges_on_ci(monkeypatch):
@@ -218,6 +248,24 @@ async def test_approval_not_required_merges_on_ci(monkeypatch):
     assert len(merge.calls) == 1
 
 
+async def test_changes_requested_blocks_merge(monkeypatch):
+    tid = make_pr_task()
+    watcher = mw.PrWatcher(make_cfg(auto_merge=True), DummyQueue())
+    merge = make_async(None)
+    patch(
+        monkeypatch,
+        pr_checks_state=make_async("success"),
+        pr_comments=make_async([]),
+        pr_labels=make_async([]),
+        pr_review_decision=make_async("changes_requested"),
+        merge_pr=merge,
+    )
+
+    await watcher._tick()
+    assert len(merge.calls) == 0
+    assert tasks.get(tid).status == "awaiting_review"
+
+
 async def test_green_but_policy_blocks_hands_off(monkeypatch):
     tid = make_pr_task()
     watcher = mw.PrWatcher(make_cfg(auto_merge=True), DummyQueue())
@@ -226,8 +274,8 @@ async def test_green_but_policy_blocks_hands_off(monkeypatch):
         monkeypatch,
         pr_checks_state=make_async("success"),
         pr_comments=make_async([]),
-        pr_review_decision=make_async("approved"),
-        # Outside allowedGlobs (default src/public/docs) → policy fails.
+        pr_labels=make_async(["auto-merge"]),            # approved…
+        # …but outside allowedGlobs (default src/public/docs) → policy fails.
         pr_changed_files=make_async([ChangedFile(file="ci/deploy.yml", added=5, deleted=0)]),
         merge_pr=merge,
         comment_issue=make_async(None),

@@ -34,10 +34,32 @@ from .gh import (
     pr_checks_state,
     pr_comments,
     pr_failed_check_conclusions,
+    pr_labels,
     pr_review_decision,
     rerun_failed_runs,
 )
 from .policy import evaluate_diff
+
+
+def _format_feedback(comments: list) -> str:
+    """Render new review comments into rework feedback, preserving each inline
+    comment's file/line anchor and hunk so the agent edits the exact spot."""
+    blocks: list[str] = []
+    for c in comments:
+        if c.path:
+            loc = f"`{c.path}`" + (f" (line {c.line})" if c.line else "")
+            block = f'- Review comment on {loc}:\n  "{c.body.strip()}"'
+            if c.diff_hunk:
+                block += f"\n  It is anchored to this diff hunk:\n  ```\n{c.diff_hunk}\n  ```"
+        else:
+            block = f'- Comment: "{c.body.strip()}"'
+        blocks.append(block)
+    guidance = (
+        "Address ONLY what each comment asks, at the exact file/line it is anchored "
+        "to. If a comment says to revert or that a change is unnecessary, undo that "
+        "specific change. Do not touch unrelated code."
+    )
+    return "Reviewer left the following comment(s) on the PR:\n\n" + "\n".join(blocks) + f"\n\n{guidance}"
 
 
 class PrWatcher:
@@ -120,36 +142,49 @@ class PrWatcher:
         repo = self.cfg.repo
         comments = await pr_comments(repo, pr)  # timeline + inline review + reviews
         reviewed_through = meta.get("prReviewedThrough", "")
-        new_human = [
-            c for c in comments
-            if not is_bot_comment(c.body) and c.created_at > reviewed_through
-        ]
+        new_human = sorted(
+            (c for c in comments
+             if not is_bot_comment(c.body) and c.created_at > reviewed_through),
+            key=lambda c: c.created_at,
+        )
         if not new_human:
             return False
 
-        latest = max(new_human, key=lambda c: c.created_at)
-        # Advance the cursor and hand the comment to a worker task. The worker
-        # classifies it (question vs change request) and acts; source resets the
-        # task back to awaiting_review when done.
+        # Hand ALL new comments to one worker task (not just the latest — that
+        # would silently drop the others when the cursor jumps forward), with
+        # each comment's file/line anchor preserved so the fix lands in the
+        # right place. The worker classifies + acts; source resets the task back
+        # to awaiting_review when done.
+        feedback = _format_feedback(new_human)
+        newest = new_human[-1].created_at
         tasks.set_meta(
             row.id,
-            {**meta, "prReviewedThrough": latest.created_at, "mode": "pr_reply", "feedback": latest.body},
+            {**meta, "prReviewedThrough": newest, "mode": "pr_reply", "feedback": feedback},
         )
         tasks.set_status(row.id, "queued")
         self.queue.poke()
-        self.log.info(f"PR #{pr}: new review comment from {latest.author} — queued for handling")
-        await comment_pr(repo, pr, f"{BOT_COMMENT_PREFIX}\n\nThanks — I'm looking at your comment now.")
+        self.log.info(f"PR #{pr}: {len(new_human)} new review comment(s) — queued for handling")
+        await comment_pr(repo, pr, f"{BOT_COMMENT_PREFIX}\n\nThanks — I'm looking at your comment(s) now.")
         return True
 
     # ── green + auto-merge: policy gate, then merge ─────────────────────────
     async def _maybe_merge(self, row: TaskRow, meta: dict, pr: int) -> None:
         repo, issue = self.cfg.repo, meta.get("issue")
 
-        # Approval gate: green CI alone is not enough — wait for a human approve.
+        # Approval gate: green CI alone is not enough. Approval is signalled by
+        # the configured label (the owner can add it to their own PR — GitHub
+        # blocks self-approving reviews) OR by a genuine approving review from a
+        # different reviewer.
         if self.cfg.require_approval:
-            decision = await pr_review_decision(repo, pr)
-            if decision != "approved":
-                self.log.info(f"PR #{pr}: CI green but review is '{decision}' — waiting for approval")
+            label = self.cfg.approve_label
+            approved = label in await pr_labels(repo, pr)
+            if not approved:
+                approved = await pr_review_decision(repo, pr) == "approved"
+            if not approved:
+                self.log.info(
+                    f"PR #{pr}: CI green but not approved — add the '{label}' label "
+                    "or an approving review to merge"
+                )
                 return
 
         files = await pr_changed_files(repo, pr)

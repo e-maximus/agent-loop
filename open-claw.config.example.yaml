@@ -13,7 +13,8 @@ sources:
     labels: { bug: bug, feature: enhancement, question: question }
     pollIntervalSec: 120
     autoMerge: false                      # auto-merge green PRs that pass the policy
-    requireApproval: true                 # + also require an approving PR review before merging
+    requireApproval: true                 # + also require human approval before merging
+    approveLabel: auto-merge              # approval = this label on the PR (or an approving review)
     cloneDir: ./data/repos
     policy:
       allowedGlobs: [src/**, public/**, docs/**, e2e/**, tests/**]

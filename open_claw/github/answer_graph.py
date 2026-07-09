@@ -42,7 +42,8 @@ def render_thread(comments: list[gh.IssueComment]) -> str:
     lines = []
     for c in comments:
         who = "open-claw (you, earlier)" if gh.is_bot_comment(c.body) else f"user ({c.author})"
-        lines.append(f"--- {who} ---\n{c.body}")
+        where = f" on {c.path}:{c.line}" if getattr(c, "path", "") else ""
+        lines.append(f"--- {who}{where} ---\n{c.body}")
     return "\n\nConversation so far (oldest first):\n\n" + "\n\n".join(lines)
 
 
