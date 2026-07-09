@@ -1,0 +1,29 @@
+[project]
+name = "open-claw"
+version = "0.2.0"
+description = "Autonomous coding-agent runner: GitHub issue auto-fix, run locally in Docker. Python + LangGraph."
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "langgraph>=0.2.60",
+    "langchain>=0.3.0",
+    "langchain-deepseek>=0.1.0",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+open-claw = "open_claw.main:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["open_claw"]
+
+[tool.pyright]
+pythonVersion = "3.12"
+typeCheckingMode = "basic"
