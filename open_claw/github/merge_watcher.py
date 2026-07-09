@@ -1,6 +1,18 @@
-"""Polls open autofix PRs for one repo and merges them once CI is green AND the
-diff passes the blast-radius policy. The merge decision is made from GitHub's own
-Checks state — never from what the agent claimed. Ported from merge-watcher.ts.
+"""Watches the open autofix PRs for one repo and drives them to a terminal
+state. A task stays `awaiting_review` — NOT done — until its PR is merged.
+
+Per tick, for each managed PR:
+  • CI red      → re-run the failed jobs ONCE (covers `cancelled`/flaky). If it
+                  is still red after that single re-run, hand off to a human.
+  • New human   → hand the comment to a worker task (`mode = pr_reply`), which
+    comment      classifies it as a question (answer it) or a change request
+                  (rework the PR). CI need not be green for this.
+  • CI green    → if auto-merge is on and the blast-radius policy passes, merge
+                  (→ task done). Otherwise leave it for the human.
+
+The merge decision is made from GitHub's own Checks state, never from what the
+agent claimed. The watcher itself does no heavy LLM work — it only detects and
+routes; the queue worker does the reasoning.
 """
 
 from __future__ import annotations
@@ -8,23 +20,39 @@ from __future__ import annotations
 import asyncio
 
 from ..config import GithubSourceConfig
-from ..db import tasks
+from ..db import TaskRow, tasks
 from ..logging import create_logger
-from .gh import comment_issue, merge_pr, pr_changed_files, pr_checks_state
+from ..queue import Queue
+from .gh import (
+    BOT_COMMENT_PREFIX,
+    comment_issue,
+    comment_pr,
+    failures_are_transient,
+    is_bot_comment,
+    list_issue_comments,
+    merge_pr,
+    pr_changed_files,
+    pr_checks_state,
+    pr_failed_check_conclusions,
+    rerun_failed_runs,
+)
 from .policy import evaluate_diff
 
 
-class MergeWatcher:
-    def __init__(self, cfg: GithubSourceConfig) -> None:
+class PrWatcher:
+    def __init__(self, cfg: GithubSourceConfig, queue: Queue) -> None:
         self.cfg = cfg
-        self.log = create_logger(f"merge-watcher:{cfg.id}")
+        self.queue = queue
+        self.log = create_logger(f"pr-watcher:{cfg.id}")
         self._task: asyncio.Task[None] | None = None
 
     def start(self) -> None:
-        if not self.cfg.auto_merge:
-            self.log.info("auto-merge disabled — watcher not started")
-            return
-        self.log.info(f"auto-merge watcher every {self.cfg.poll_interval_sec}s")
+        # Runs even when auto-merge is off: it still re-runs red CI and routes
+        # human review comments back into rework. Only the final merge is gated.
+        self.log.info(
+            f"PR watcher every {self.cfg.poll_interval_sec}s "
+            f"(auto-merge {'on' if self.cfg.auto_merge else 'off'})"
+        )
         self._task = asyncio.create_task(self._loop())
 
     def stop(self) -> None:
@@ -42,50 +70,101 @@ class MergeWatcher:
                 self.log.error("tick failed", str(e))
             await asyncio.sleep(self.cfg.poll_interval_sec)
 
-    def _set_state(self, task_id: int, meta: dict, state: str) -> None:
-        tasks.set_meta(task_id, {**meta, "mergeState": state})
-
     async def _tick(self) -> None:
-        for row in tasks.awaiting_merge():
+        for row in tasks.awaiting_review_prs():
             meta = row.meta_dict()
-            repo, issue, pr = meta.get("repo"), meta.get("issue"), meta.get("prNumber")
-            if pr is None or repo != self.cfg.repo:  # another repo's watcher owns it
+            if meta.get("repo") != self.cfg.repo:  # another repo's watcher owns it
+                continue
+            pr = meta.get("prNumber")
+            if pr is None:
                 continue
 
-            state = await pr_checks_state(repo, pr)
-            if state == "pending":
-                continue
-
+            state = await pr_checks_state(self.cfg.repo, pr)
             if state == "failure":
-                self.log.warn(f"PR #{pr}: CI red — leaving for review")
-                self._set_state(row.id, meta, "ci_failed")
-                await comment_issue(repo, issue, f"🤖 CI is red on PR #{pr} — leaving it for manual review.")
+                await self._handle_ci_failure(row, meta, pr)
                 continue
 
-            if state == "none":
-                self.log.warn(f"PR #{pr}: no CI checks found — leaving for review")
-                self._set_state(row.id, meta, "manual")
-                await comment_issue(
-                    repo, issue,
-                    f"🤖 PR #{pr} has no CI checks — cannot auto-merge, leaving it for review.",
-                )
+            # Not failing (green / none / pending): react to a new human comment.
+            if await self._handle_new_comment(row, meta, pr):
                 continue
 
-            # Green. Now the blast-radius policy on the actual diff.
-            files = await pr_changed_files(repo, pr)
-            verdict = evaluate_diff(files, self.cfg.policy)
-            if not verdict.ok:
-                self.log.warn(f"PR #{pr}: policy blocked — {'; '.join(verdict.reasons)}")
-                self._set_state(row.id, meta, "manual")
-                reasons = "\n- ".join(verdict.reasons)
-                await comment_issue(
-                    repo, issue,
-                    f"🤖 CI is green, but the auto-merge policy did not pass:\n- {reasons}\n\n"
-                    f"Leaving PR #{pr} for manual review.",
-                )
-                continue
+            if state == "success" and self.cfg.auto_merge:
+                await self._maybe_merge(row, meta, pr)
+            elif state == "none" and self.cfg.auto_merge:
+                await self._handoff(row, meta, f"🤖 PR #{pr} has no CI checks — cannot auto-merge, leaving it for review.")
 
-            self.log.info(f"PR #{pr}: green + policy ok → merging")
-            await merge_pr(repo, pr)
-            self._set_state(row.id, meta, "merged")
-            await comment_issue(repo, issue, f"✅ open-claw merged PR #{pr} (CI green, policy passed).")
+    # ── CI failure: exactly one automatic re-run, then a human ──────────────
+    async def _handle_ci_failure(self, row: TaskRow, meta: dict, pr: int) -> None:
+        repo, issue, branch = self.cfg.repo, meta.get("issue"), meta.get("branch", "")
+        if meta.get("ciRerunCount", 0) < 1:
+            conclusions = await pr_failed_check_conclusions(repo, pr)
+            triggered = await rerun_failed_runs(repo, branch)
+            tasks.set_meta(row.id, {**meta, "ciRerunCount": 1})
+            kind = "transient (cancelled/timed-out)" if failures_are_transient(conclusions) else "failing"
+            tail = "re-running the failed jobs once" if triggered else "but I could not trigger a re-run automatically"
+            self.log.info(f"PR #{pr}: CI {kind} ({','.join(conclusions) or '?'}) — {tail}")
+            await comment_pr(
+                repo, pr,
+                f"{BOT_COMMENT_PREFIX}\n\nCI is {kind} ({', '.join(conclusions) or 'unknown'}); {tail}.",
+            )
+        else:
+            self.log.warn(f"PR #{pr}: CI still red after one re-run — handing off")
+            await self._handoff(
+                row, meta,
+                f"🤖 CI is still red on PR #{pr} after one automatic re-run — leaving it for manual review.",
+            )
+
+    # ── human comment: route to a worker that answers or reworks ────────────
+    async def _handle_new_comment(self, row: TaskRow, meta: dict, pr: int) -> bool:
+        repo = self.cfg.repo
+        comments = await list_issue_comments(repo, pr)  # PR is an issue for comments
+        reviewed_through = meta.get("prReviewedThrough", "")
+        new_human = [
+            c for c in comments
+            if not is_bot_comment(c.body) and c.created_at > reviewed_through
+        ]
+        if not new_human:
+            return False
+
+        latest = max(new_human, key=lambda c: c.created_at)
+        # Advance the cursor and hand the comment to a worker task. The worker
+        # classifies it (question vs change request) and acts; source resets the
+        # task back to awaiting_review when done.
+        tasks.set_meta(
+            row.id,
+            {**meta, "prReviewedThrough": latest.created_at, "mode": "pr_reply", "feedback": latest.body},
+        )
+        tasks.set_status(row.id, "queued")
+        self.queue.poke()
+        self.log.info(f"PR #{pr}: new review comment from {latest.author} — queued for handling")
+        await comment_pr(repo, pr, f"{BOT_COMMENT_PREFIX}\n\nThanks — I'm looking at your comment now.")
+        return True
+
+    # ── green + auto-merge: policy gate, then merge ─────────────────────────
+    async def _maybe_merge(self, row: TaskRow, meta: dict, pr: int) -> None:
+        repo, issue = self.cfg.repo, meta.get("issue")
+        files = await pr_changed_files(repo, pr)
+        verdict = evaluate_diff(files, self.cfg.policy)
+        if not verdict.ok:
+            self.log.warn(f"PR #{pr}: policy blocked — {'; '.join(verdict.reasons)}")
+            reasons = "\n- ".join(verdict.reasons)
+            await self._handoff(
+                row, meta,
+                f"🤖 CI is green, but the auto-merge policy did not pass:\n- {reasons}\n\n"
+                f"Leaving PR #{pr} for manual review.",
+            )
+            return
+
+        self.log.info(f"PR #{pr}: green + policy ok → merging")
+        await merge_pr(repo, pr)
+        tasks.set_meta(row.id, {**meta, "prState": "merged"})
+        tasks.finish_done(row.id, f"Merged PR #{pr} (CI green, policy passed).")
+        await comment_issue(repo, issue, f"✅ open-claw merged PR #{pr} (CI green, policy passed).")
+
+    async def _handoff(self, row: TaskRow, meta: dict, comment: str) -> None:
+        """Mark a PR as needing a human: the task stays awaiting_review (not
+        closed — only a merge closes it) but the watcher stops acting on it."""
+        tasks.set_meta(row.id, {**meta, "prState": "manual"})
+        issue = meta.get("issue")
+        if issue is not None:
+            await comment_issue(self.cfg.repo, issue, comment)

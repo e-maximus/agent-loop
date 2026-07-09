@@ -17,7 +17,19 @@ from typing import Any, Literal
 
 from .config import DB_PATH
 
-TaskStatus = Literal["queued", "running", "done", "failed", "cancelled"]
+TaskStatus = Literal[
+    "queued", "running", "done", "failed", "cancelled",
+    # PR opened and waiting on human review / CI / merge (not yet closed).
+    "awaiting_review",
+    # Intake triage gate refused the task as unsafe — terminal, never retried.
+    "rejected",
+]
+
+# Statuses that mean "this issue is already being handled" so the poller must
+# not enqueue it again. awaiting_review (PR in flight) and rejected are terminal
+# for polling purposes alongside the classic queued/running/done/failed.
+_TAKEN_STATUSES = ("queued", "running", "done", "failed", "awaiting_review", "rejected")
+_IN_FLIGHT_STATUSES = ("queued", "running", "awaiting_review")
 GithubKind = Literal["bug", "feature", "question"]
 
 
@@ -105,22 +117,24 @@ class _Tasks:
         """Has this issue already been picked up? Bug/feature issues are one-shot:
         a 'failed' attempt counts as taken too, so a crash is NOT retried in a
         loop — it is left for a human (see the failure comment on the issue)."""
+        placeholders = ",".join("?" * len(_TAKEN_STATUSES))
         r = _db.execute(
-            """SELECT id FROM tasks WHERE source = 'github'
-                 AND status IN ('queued','running','done','failed')
+            f"""SELECT id FROM tasks WHERE source = 'github'
+                 AND status IN ({placeholders})
                  AND json_extract(meta, '$.repo') = ? AND json_extract(meta, '$.issue') = ?
                LIMIT 1""",
-            (repo, issue),
+            (*_TAKEN_STATUSES, repo, issue),
         ).fetchone()
         return r is not None
 
     def has_github_issue_in_flight(self, repo: str, issue: int) -> bool:
+        placeholders = ",".join("?" * len(_IN_FLIGHT_STATUSES))
         r = _db.execute(
-            """SELECT id FROM tasks WHERE source = 'github'
-                 AND status IN ('queued','running')
+            f"""SELECT id FROM tasks WHERE source = 'github'
+                 AND status IN ({placeholders})
                  AND json_extract(meta, '$.repo') = ? AND json_extract(meta, '$.issue') = ?
                LIMIT 1""",
-            (repo, issue),
+            (*_IN_FLIGHT_STATUSES, repo, issue),
         ).fetchone()
         return r is not None
 
@@ -134,13 +148,16 @@ class _Tasks:
             ).fetchone()
         )
 
-    def awaiting_merge(self) -> list[TaskRow]:
-        """PRs opened by autofix that still need a merge decision."""
+    def awaiting_review_prs(self) -> list[TaskRow]:
+        """Open PRs the watcher still actively manages: task is awaiting_review,
+        a PR exists, and it has not been handed off to a human (`prState` =
+        'manual') — those stay awaiting_review but the watcher stops acting."""
         rows = _db.execute(
             """SELECT * FROM tasks WHERE source = 'github'
+                 AND status = 'awaiting_review'
                  AND json_extract(meta, '$.prNumber') IS NOT NULL
-                 AND (json_extract(meta, '$.mergeState') IS NULL
-                      OR json_extract(meta, '$.mergeState') = 'pending')"""
+                 AND (json_extract(meta, '$.prState') IS NULL
+                      OR json_extract(meta, '$.prState') != 'manual')"""
         ).fetchall()
         return [r for r in (_row(x) for x in rows) if r]
 

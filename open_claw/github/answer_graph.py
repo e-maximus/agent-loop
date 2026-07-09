@@ -47,7 +47,8 @@ def render_thread(comments: list[gh.IssueComment]) -> str:
 
 
 def build_answer_graph(
-    llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfig, guidance: str = ""
+    llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfig, guidance: str = "",
+    *, auto_post: bool = True,
 ):
     guidance_suffix = f"\n\n{guidance}" if guidance else ""
 
@@ -78,8 +79,13 @@ def build_answer_graph(
 
     g = StateGraph(AnswerState)
     g.add_node("answer", answer)
-    g.add_node("post", post)
     g.add_edge(START, "answer")
-    g.add_edge("answer", "post")
-    g.add_edge("post", END)
+    if auto_post:
+        # Issue questions post themselves as an issue comment. PR replies skip
+        # this — the caller posts the answer on the PR thread instead.
+        g.add_node("post", post)
+        g.add_edge("answer", "post")
+        g.add_edge("post", END)
+    else:
+        g.add_edge("answer", END)
     return g.compile()

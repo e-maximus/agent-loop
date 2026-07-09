@@ -91,6 +91,10 @@ class GithubSourceConfig(BaseModel):
         default=["npm run lint", "npm run build", "npx playwright test"],
         alias="verifyCommands",
     )
+    # Optional security scanners run by the diff-security node (after critic).
+    # Empty by default — the node still does an LLM review of the diff. Any
+    # command exiting non-zero is treated as a security finding.
+    security_commands: list[str] = Field(default_factory=list, alias="securityCommands")
 
     model_config = SettingsConfigDict(populate_by_name=True)
 

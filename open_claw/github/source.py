@@ -23,17 +23,21 @@ from ..logging import create_logger, task_log_scope
 from ..queue import Queue
 from .answer_graph import build_answer_graph, render_thread
 from .autofix_graph import build_autofix_graph
+from . import prompts
 from .gh import (
     BOT_COMMENT_PREFIX,
+    checkout_existing_branch,
     comment_issue,
+    comment_pr,
     default_branch,
     ensure_clone,
     is_authenticated,
     is_bot_comment,
+    issue_author_association,
     list_issue_comments,
     prepare_branch,
 )
-from .merge_watcher import MergeWatcher
+from .merge_watcher import PrWatcher
 from .poller import GithubPoller
 
 log = create_logger("github")
@@ -70,7 +74,7 @@ class GithubSource:
         self.id = cfg.id
         self.llm = llm
         self.poller = GithubPoller(cfg, queue)
-        self.watcher = MergeWatcher(cfg)
+        self.watcher = PrWatcher(cfg, queue)
 
     async def start(self) -> None:
         if not await is_authenticated():
@@ -88,6 +92,8 @@ class GithubSource:
         with task_log_scope("github", f"issue{meta.get('issue')}") as logfile:
             log.info(f"task #{task.id} → {meta.get('kind')} #{meta.get('issue')} (log: {logfile})")
             try:
+                if meta.get("mode") == "pr_reply":
+                    return await self._pr_reply(task, meta)
                 if meta.get("kind") == "question":
                     return await self._answer(task, meta)
                 return await self._autofix(task, meta)
@@ -117,35 +123,139 @@ class GithubSource:
         await comment_issue(repo, issue, body)
         log.warn(f"#{issue}: signalled failure on the issue thread")
 
+    async def _triage(self, task: TaskRow, meta: dict) -> tuple[bool, str]:
+        """Intake security gate: decide whether the request is safe to work on at
+        all, from the issue text + the author's trust level — before any clone.
+        Returns (allowed, verdict_text)."""
+        repo, issue = meta["repo"], meta["issue"]
+        assoc = meta.get("authorAssociation") or await issue_author_association(repo, issue)
+        author = meta.get("author", "unknown")
+        user = (
+            f"Issue #{issue} in {repo}\nAuthor: {author} (authorAssociation: {assoc})\n\n"
+            f"Title: {task.prompt}\n\n{meta.get('body') or '(no body)'}"
+        )
+        resp = await self.llm.ainvoke([("system", prompts.triage_prompt(assoc)), ("user", user)])
+        text = resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
+        allowed = "REJECT" not in text.split("\n", 1)[0].upper()
+        return allowed, text
+
     async def _autofix(self, task: TaskRow, meta: dict) -> str | None:
         repo, issue, kind = meta["repo"], meta["issue"], meta["kind"]
-        log.info(f"autofix {kind} #{issue} in {repo}")
+        mode = meta.get("mode", "")
+        log.info(f"autofix {kind} #{issue} in {repo}{' (rework)' if mode == 'rework' else ''}")
+
+        # ── intake security gate (first pass only; rework already passed it) ──
+        if mode != "rework":
+            allowed, verdict = await self._triage(task, meta)
+            if not allowed:
+                reason = verdict.split("\n", 1)[-1].strip() or verdict
+                await comment_issue(
+                    repo, issue,
+                    f"{BOT_COMMENT_PREFIX}\n\nThis request was declined by the security intake policy: {reason}",
+                )
+                tasks.set_status(task.id, "rejected")
+                log.warn(f"#{issue}: intake gate REJECTED — {reason[:200]}")
+                return f"Rejected by intake gate: {reason[:200]}"
+
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         base = await default_branch(repo)
-        branch = f"issue-{issue}"
-        await prepare_branch(repo_path, branch)
+        branch = meta.get("branch") or f"issue-{issue}"
+        if mode == "rework":
+            await checkout_existing_branch(repo_path, branch)
+        else:
+            await prepare_branch(repo_path, branch)
 
         guidance = read_repo_guidance(repo_path)
         if guidance:
             log.info(f"#{issue}: loaded repo instructions ({len(guidance)} chars)")
 
+        state: dict = {
+            "repo": repo, "issue": issue, "kind": kind,
+            "title": task.prompt, "body": meta.get("body", ""), "url": meta.get("url", ""),
+            "base": base, "branch": branch, "repo_path": repo_path,
+        }
+        if mode == "rework":
+            feedback = meta.get("feedback", "")
+            state.update(
+                mode="rework",
+                pr_number=meta.get("prNumber", 0),
+                pr_url=meta.get("prUrl", ""),
+                plan=f"Address this reviewer feedback on the existing PR:\n{feedback}",
+                critic_feedback=feedback,
+            )
+
         async with task_container(repo_path, self.cfg.container) as env:
             graph = build_autofix_graph(self.llm, env, self.cfg, guidance)
+            out = await graph.ainvoke(state, config={"recursion_limit": _GRAPH_RECURSION})
+
+        if out.get("pr_number"):
+            # Park the task in awaiting_review with a fresh CI-rerun budget; the
+            # PR watcher takes it from here and only merge closes it.
+            tasks.set_meta(
+                task.id,
+                {
+                    **meta, "branch": branch,
+                    "prNumber": out["pr_number"], "prUrl": out.get("pr_url"),
+                    "prState": "open", "ciRerunCount": 0, "mode": "", "feedback": "",
+                },
+            )
+            tasks.set_status(task.id, "awaiting_review")
+        return out.get("result")
+
+    async def _pr_reply(self, task: TaskRow, meta: dict) -> str | None:
+        """Handle a human comment on an open PR: classify it, then either answer
+        (question) or rework the PR (change request). Set by the PR watcher via
+        `mode = pr_reply` + `feedback = <comment>`."""
+        repo, issue, pr = meta["repo"], meta["issue"], meta.get("prNumber")
+        comment = meta.get("feedback", "")
+        user = (
+            f"PR #{pr} for issue #{issue} in {repo}\n\n"
+            f"Issue title: {task.prompt}\n\n{meta.get('body') or ''}\n\n"
+            f"--- the human's comment ---\n{comment}"
+        )
+        resp = await self.llm.ainvoke(
+            [("system", prompts.classify_comment_prompt()), ("user", user)]
+        )
+        text = resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
+        first = text.split("\n", 1)[0].upper()
+        intent = "CHANGE_REQUEST" if "CHANGE" in first else "QUESTION" if "QUESTION" in first else "NONE"
+        log.info(f"#{issue}: PR comment classified as {intent}")
+
+        if intent == "CHANGE_REQUEST":
+            # Rework the PR in place; _autofix parks it back in awaiting_review.
+            return await self._autofix(task, {**meta, "mode": "rework"})
+
+        if intent == "QUESTION":
+            answer = await self._answer_pr(task, meta)
+            await comment_pr(repo, pr, f"{BOT_COMMENT_PREFIX}\n\n{answer[:60000]}")
+            result = f"Answered comment on PR #{pr}."
+        else:
+            result = f"No action needed for comment on PR #{pr}."
+
+        # Back to waiting; the comment cursor was already advanced by the watcher.
+        tasks.set_meta(task.id, {**meta, "mode": "", "feedback": "", "prState": "open"})
+        tasks.set_status(task.id, "awaiting_review")
+        return result
+
+    async def _answer_pr(self, task: TaskRow, meta: dict) -> str:
+        """Answer a question comment grounded in the PR branch code."""
+        repo, issue = meta["repo"], meta["issue"]
+        branch = meta.get("branch") or f"issue-{issue}"
+        repo_path = await ensure_clone(repo, self.cfg.clone_dir)
+        await checkout_existing_branch(repo_path, branch)
+        comments = await list_issue_comments(repo, meta.get("prNumber"))
+        thread = render_thread(comments)
+        guidance = read_repo_guidance(repo_path)
+        async with task_container(repo_path, self.cfg.container) as env:
+            graph = build_answer_graph(self.llm, env, self.cfg, guidance, auto_post=False)
             out = await graph.ainvoke(
                 {
-                    "repo": repo, "issue": issue, "kind": kind,
-                    "title": task.prompt, "body": meta.get("body", ""), "url": meta.get("url", ""),
-                    "base": base, "branch": branch, "repo_path": repo_path,
+                    "repo": repo, "issue": issue, "title": task.prompt,
+                    "body": meta.get("body", ""), "url": meta.get("prUrl", ""), "thread": thread,
                 },
                 config={"recursion_limit": _GRAPH_RECURSION},
             )
-
-        if out.get("pr_number"):
-            tasks.set_meta(
-                task.id,
-                {**meta, "branch": branch, "prNumber": out["pr_number"], "prUrl": out.get("pr_url")},
-            )
-        return out.get("result")
+        return out.get("answer") or "(no answer produced)"
 
     async def _answer(self, task: TaskRow, meta: dict) -> str | None:
         repo, issue = meta["repo"], meta["issue"]

@@ -22,6 +22,13 @@ sources:
       - npm run lint
       - npm run build
       - npx playwright test
+    # Optional security scanners run by the diff-security node (after the critic).
+    # Any non-zero exit is treated as a finding and loops back to implement. The
+    # node also always does an LLM security review of the diff, so this may be
+    # left empty. Example:
+    # securityCommands:
+    #   - npm audit --audit-level=high
+    #   - npx semgrep --error --config auto
     # Opt-in Docker: agent Bash/build/tests run inside this image via docker
     # exec. Omit the whole block to execute on the host instead. Use a
     # Playwright image so e2e browsers are present.

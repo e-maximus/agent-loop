@@ -28,6 +28,7 @@ class Issue:
     body: str
     url: str
     labels: list[str] = field(default_factory=list)
+    author: str = ""
 
 
 @dataclass
@@ -75,7 +76,7 @@ async def list_open_issues(repo: str) -> list[Issue]:
     res = await run(
         "gh",
         ["issue", "list", "--repo", repo, "--state", "open",
-         "--json", "number,title,body,url,labels", "--limit", "100"],
+         "--json", "number,title,body,url,labels,author", "--limit", "100"],
     )
     parsed = json.loads(res.stdout or "[]")
     return [
@@ -85,9 +86,21 @@ async def list_open_issues(repo: str) -> list[Issue]:
             body=i.get("body") or "",
             url=i["url"],
             labels=[l["name"] for l in (i.get("labels") or [])],
+            author=(i.get("author") or {}).get("login", ""),
         )
         for i in parsed
     ]
+
+
+async def issue_author_association(repo: str, issue: int) -> str:
+    """Author's relationship to the repo (OWNER/MEMBER/COLLABORATOR/NONE/…).
+    `gh issue list --json` does not expose it, so fetch it per issue only when
+    the triage gate actually needs it. Falls back to NONE (the strictest case)."""
+    res = await run(
+        "gh", ["api", f"repos/{repo}/issues/{issue}", "--jq", ".author_association"],
+        throw_on_error=False,
+    )
+    return (res.stdout.strip() or "NONE") if res.code == 0 else "NONE"
 
 
 async def list_issue_comments(repo: str, issue: int) -> list[IssueComment]:
@@ -128,6 +141,13 @@ async def ensure_clone(repo: str, clone_dir: str) -> str:
 
 async def prepare_branch(repo_path: str, branch: str) -> None:
     await run("git", ["checkout", "-B", branch], cwd=repo_path)
+
+
+async def checkout_existing_branch(repo_path: str, branch: str) -> None:
+    """Check out an existing PR branch from origin for rework, preserving its
+    commits (unlike prepare_branch, which resets the branch onto base)."""
+    await run("git", ["fetch", "origin", branch], cwd=repo_path)
+    await run("git", ["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
 
 
 async def has_changes(repo_path: str) -> bool:
@@ -182,6 +202,68 @@ async def pr_checks_state(repo: str, pr_number: int) -> ChecksState:
         elif conclusion in ("PENDING", "EXPECTED"):
             any_pending = True
     return "pending" if any_pending else "success"
+
+
+_TRANSIENT_CONCLUSIONS = frozenset({"CANCELLED", "TIMED_OUT", "STALE", "ACTION_REQUIRED"})
+
+
+async def pr_failed_check_conclusions(repo: str, pr_number: int) -> list[str]:
+    """Upper-cased conclusions of the PR's failing checks (FAILURE, CANCELLED, …).
+    Lets the watcher tell a transient failure (cancelled/timed-out — worth one
+    rerun) apart from a genuine build/test failure."""
+    res = await run(
+        "gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
+        throw_on_error=False,
+    )
+    if res.code != 0:
+        return []
+    checks = (json.loads(res.stdout or "{}").get("statusCheckRollup")) or []
+    bad: list[str] = []
+    for c in checks:
+        conclusion = (c.get("conclusion") or c.get("state") or "").upper()
+        if conclusion in ("FAILURE", "ERROR", "CANCELLED", "TIMED_OUT", "ACTION_REQUIRED"):
+            bad.append(conclusion)
+    return bad
+
+
+def failures_are_transient(conclusions: list[str]) -> bool:
+    """True when every failing check is a transient (cancelled/timed-out) one —
+    i.e. a rerun has a real chance of going green without any code change."""
+    return bool(conclusions) and all(c in _TRANSIENT_CONCLUSIONS for c in conclusions)
+
+
+async def rerun_failed_runs(repo: str, branch: str) -> bool:
+    """Re-run the failed jobs of the most recent workflow run on `branch`.
+    Returns True if a rerun was triggered. Used at most once per PR."""
+    res = await run(
+        "gh", ["run", "list", "--repo", repo, "--branch", branch, "--limit", "20",
+               "--json", "databaseId,conclusion,status,headSha"],
+        throw_on_error=False,
+    )
+    if res.code != 0:
+        return False
+    runs = json.loads(res.stdout or "[]")
+    # Newest first; act on the latest commit's runs only.
+    head_sha = next((r.get("headSha") for r in runs), None)
+    triggered = False
+    for r in runs:
+        if r.get("headSha") != head_sha:
+            continue
+        conclusion = (r.get("conclusion") or "").upper()
+        if conclusion in ("FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"):
+            rr = await run(
+                "gh", ["run", "rerun", str(r["databaseId"]), "--repo", repo, "--failed"],
+                throw_on_error=False,
+            )
+            triggered = triggered or rr.code == 0
+    return triggered
+
+
+async def comment_pr(repo: str, pr_number: int, body: str) -> None:
+    await run(
+        "gh", ["pr", "comment", str(pr_number), "--repo", repo, "--body", body],
+        throw_on_error=False,
+    )
 
 
 async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:

@@ -58,8 +58,13 @@ class Queue:
         log.info(f"▶ task #{task.id} ({task.source}) started")
         try:
             result = await self._runner(task)
-            tasks.finish_done(task.id, result)
-            log.info(f"✓ task #{task.id} done")
+            # The runner may have parked the task in a non-terminal state it owns
+            # (e.g. 'awaiting_review' while a PR waits for review, or 'rejected'
+            # by the intake gate). Only close it if it is still 'running'.
+            current = tasks.get(task.id)
+            if current is not None and current.status == "running":
+                tasks.finish_done(task.id, result)
+            log.info(f"✓ task #{task.id} finished ({(tasks.get(task.id) or task).status})")
         except Exception as err:  # noqa: BLE001 — a task failing must not kill the worker
             import traceback
 

@@ -2,9 +2,12 @@
 
 An autonomous GitHub issue **auto-fix** runner on your **local machine**, built
 on **Python + LangGraph**. It polls your repos, and for each labelled issue it
-investigates, plans, implements a fix, writes e2e tests, verifies the build, and
-opens a PR — optionally auto-merging once CI is green. The agent's work runs in
-an isolated **Docker** container (opt-in).
+screens the request for safety, investigates, plans, implements a fix, writes
+e2e tests, verifies the build, runs a security review of the diff, and opens a
+PR. From there it watches the PR: it re-runs flaky/cancelled CI once, answers or
+reworks the PR from human review comments, and — optionally — auto-merges once
+CI is green. A task is only **closed when its PR is merged**. The agent's work
+runs in an isolated **Docker** container (opt-in).
 
 > Rewritten from the original TypeScript/Telegram version. Telegram task ingress
 > has been removed; the only source type is GitHub.
@@ -25,24 +28,39 @@ LLM call where the input is already gathered, and plain deterministic code where
 there is no judgement to make:
 
 ```
-investigate ─▶ plan ─▶ implement ─┬─(no changes)─────────────────▶ publish
- (agent,RO)   (LLM)   (agent)      └─(changes)─▶ write_tests ─▶ verify
-                                                   (agent)     (deterministic:
-       ┌──────── implement (≤3 cycles) ◀── red / revise ──────── lint+build+e2e)
-       ▼                                                            │ green
-    (retry)                                        critic ─approve──┴─▶ summarize ─▶ publish
-                                                   (LLM review)
+intake gate ─▶ investigate ─▶ plan ─▶ implement ─┬─(no changes)──────────────▶ publish
+ (LLM, host)    (agent,RO)    (LLM)   (agent)     └─(changes)─▶ write_tests ─▶ verify
+      │ reject                                                   (agent)     (deterministic:
+      ▼                                                                       lint+build+e2e)
+   decline    ┌──── implement (≤3 cycles) ◀── red / revise / sec-fail ──────────┤
+    (host)    ▼                                                                 │ green
+           (retry)                    critic ─approve─▶ security ─pass─▶ summarize ─▶ publish
+                                      (LLM review)     (scanners+LLM)
 ```
 
+- **intake gate** — before any clone: an LLM judges whether the request is safe
+  to act on at all, from the issue text + the author's trust level
+  (`authorAssociation`). A malicious/unsafe ask (inject a script, exfiltrate
+  secrets, weaken auth…) is **declined** and never worked on. External authors
+  are judged more strictly.
 - **investigate / implement / write_tests** — ReAct agents (`create_react_agent`)
   with the Read/Write/Edit/Bash/Grep/Glob tools.
 - **plan / critic / summarize** — single, focused LLM calls.
 - **verify** — runs the configured commands (lint + build + e2e); a red result
   loops back to `implement` with the failure log (bounded to 3 cycles, then it
   escalates and opens the PR flagged for human review).
-- **prepare** (clone/branch) and **publish** (commit/push/PR/comment) run on the
-  **host** (they need `gh` credentials); only the agent's shell work runs in the
-  container.
+- **security** — after the critic approves: runs any configured security
+  scanners (`securityCommands`, e.g. `npm audit`/`semgrep`) plus an LLM security
+  review of the diff. A finding loops back to `implement` within the same cycle
+  budget. This is the diff-level check ("did we introduce a vulnerability?"),
+  distinct from the intake gate ("should we do this at all?").
+- **prepare** (clone/branch), the **intake gate**, and **publish**
+  (commit/push/PR/comment) run on the **host** (they need `gh` credentials); only
+  the agent's shell work runs in the container.
+
+On **rework** (a review comment asked for changes, or a fix must be pushed to an
+existing PR) the graph re-enters straight at `implement` on the PR branch and
+pushes to it instead of opening a new PR.
 
 Layers: [config.py](open_claw/config.py) · [db.py](open_claw/db.py) ·
 [queue.py](open_claw/queue.py) · [container.py](open_claw/container.py) ·
@@ -80,19 +98,32 @@ question):
 
 | Label | What it does |
 |---|---|
-| `bug` | investigate → fix → write regression test → PR |
-| `enhancement` | implement the feature → write e2e test → PR (conservative) |
+| `bug` | intake gate → investigate → fix → regression test → security → PR |
+| `enhancement` | intake gate → implement → e2e test → security → PR (conservative) |
 | `question` | reply with an issue comment, **no code, no PR** (thread stays open) |
 
-For bug/feature, if `autoMerge: true` the [merge watcher](open_claw/github/merge_watcher.py)
-waits for **green CI** (decided from the GitHub Checks API, not the agent's word)
-and, if the diff passes the **blast-radius policy** (`policy.allowedGlobs` +
-`policy.maxChangedLines`), squash-merges. Otherwise it comments and leaves the PR
-for review.
+## PR lifecycle
+
+Opening a PR does **not** close the task — it moves to `awaiting_review` and is
+closed (`done`) only when the PR merges. The
+[PR watcher](open_claw/github/merge_watcher.py) manages each open PR (it runs
+even when auto-merge is off), deciding from GitHub's own Checks API — never the
+agent's word:
+
+- **CI red** → it re-runs the failed jobs **once** (this alone clears most
+  `cancelled`/flaky failures). If CI is still red after that single re-run, the
+  PR is handed off to a human.
+- **A human review comment** → the comment is classified as a **question**
+  (answered on the PR, grounded in the branch code) or a **change request** (the
+  task goes back into **rework** — the agent amends the same PR branch and
+  pushes). CI need not be green for this.
+- **CI green** → if `autoMerge: true` and the diff passes the **blast-radius
+  policy** (`policy.allowedGlobs` + `policy.maxChangedLines`), it squash-merges.
+  Otherwise it leaves the PR for review.
 
 **The target repo must have a PR CI workflow that runs the same lint/build/e2e**
 — the local verify run is a fast pre-check, the CI run is the authoritative gate
-the merge-watcher trusts.
+the PR watcher trusts.
 
 ## The model
 
@@ -103,4 +134,6 @@ only the "brain" — the tool-use loop is LangGraph's and the tool executor is o
 ## Keeping it alive
 
 The process runs as long as the machine is on. Wrap it in `pm2`/launchd to
-survive sleep/crashes; interrupted tasks are marked failed on boot and re-picked.
+survive sleep/crashes; tasks interrupted mid-run are re-queued on boot (an
+interruption is not a failure), while `awaiting_review` PRs are picked back up by
+the watcher.

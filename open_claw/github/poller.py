@@ -115,6 +115,9 @@ class GithubPoller:
                 "kind": kind,
                 "url": issue.url,
                 "body": issue.body,
+                "author": issue.author,
+                # authorAssociation is not in the list API — the triage gate
+                # fetches it per-issue when it actually needs it.
             },
         )
         self.log.info(f"enqueued {kind} for #{issue.number}: {issue.title}")
