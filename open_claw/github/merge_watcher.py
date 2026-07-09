@@ -164,7 +164,8 @@ class PrWatcher:
         tasks.set_status(row.id, "queued")
         self.queue.poke()
         self.log.info(f"PR #{pr}: {len(new_human)} new review comment(s) — queued for handling")
-        await comment_pr(repo, pr, f"{BOT_COMMENT_PREFIX}\n\nThanks — I'm looking at your comment(s) now.")
+        # No ack comment here — the rework/answer posts a single summary comment
+        # when it's done, so the agent leaves exactly one comment per round.
         return True
 
     # ── green + auto-merge: policy gate, then merge ─────────────────────────

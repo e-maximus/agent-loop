@@ -117,7 +117,7 @@ async def test_new_human_comment_queues_rework(monkeypatch):
     assert "Please rename the button" in meta["feedback"]
     assert meta["prReviewedThrough"] == "2024-06-01T10:00:00Z"
     assert q.pokes == 1
-    assert len(comment_pr.calls) == 1
+    assert len(comment_pr.calls) == 0              # no ack — one summary comment per round
 
 
 async def test_all_new_comments_handled_with_anchors(monkeypatch):
