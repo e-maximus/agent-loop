@@ -46,12 +46,18 @@ def render_thread(comments: list[gh.IssueComment]) -> str:
     return "\n\nConversation so far (oldest first):\n\n" + "\n\n".join(lines)
 
 
-def build_answer_graph(llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfig):
+def build_answer_graph(
+    llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfig, guidance: str = ""
+):
+    guidance_suffix = f"\n\n{guidance}" if guidance else ""
+
     async def answer(s: AnswerState) -> dict[str, Any]:
         log.info(f"#{s['issue']} answer")
         tools = build_tools(env, include_write=False)  # read-only
         agent = create_react_agent(
-            llm, tools, prompt=prompts.answer_prompt(cfg.labels.bug, cfg.labels.feature)
+            llm,
+            tools,
+            prompt=prompts.answer_prompt(cfg.labels.bug, cfg.labels.feature) + guidance_suffix,
         )
         user = (
             f"Answer this GitHub issue (a question).\n\nTitle: {s['title']}\n\n"

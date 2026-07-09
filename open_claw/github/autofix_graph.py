@@ -73,12 +73,17 @@ def _issue_context(s: AutofixState) -> str:
     )
 
 
-def build_autofix_graph(llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfig):
+def build_autofix_graph(
+    llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfig, guidance: str = ""
+):
     repo_path = env.repo_path
+    # Repository instructions (AGENTS.md/CLAUDE.md) are injected into every node's
+    # system prompt so the agent always sees them before acting.
+    guidance_suffix = f"\n\n{guidance}" if guidance else ""
 
     async def _run_agent(system: str, user: str, *, include_write: bool) -> str:
         tools = build_tools(env, include_write=include_write)
-        agent = create_react_agent(llm, tools, prompt=system)
+        agent = create_react_agent(llm, tools, prompt=system + guidance_suffix)
         result = await agent.ainvoke(
             {"messages": [("user", user)]},
             config={"recursion_limit": _RECURSION},
@@ -91,7 +96,7 @@ def build_autofix_graph(llm: BaseChatModel, env: ExecEnv, cfg: GithubSourceConfi
         return final.content.strip() if isinstance(final.content, str) else str(final.content)
 
     async def _ask(system: str, user: str) -> str:
-        resp = await llm.ainvoke([("system", system), ("user", user)])
+        resp = await llm.ainvoke([("system", system + guidance_suffix), ("user", user)])
         return resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
 
     # ── nodes ──────────────────────────────────────────────────────────────

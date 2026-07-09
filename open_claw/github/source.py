@@ -10,6 +10,7 @@ environment (host or Docker container). Prepare (clone/branch) and publish
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
 
@@ -27,6 +28,26 @@ from .poller import GithubPoller
 log = create_logger("github")
 
 _GRAPH_RECURSION = 120  # super-step budget for the outer pipeline (bounded loops)
+_GUIDANCE_MAX_CHARS = 8000  # cap injected repo instructions to keep context sane
+
+
+def read_repo_guidance(repo_path: str) -> str:
+    """Read AGENTS.md / CLAUDE.md from the checkout root so the agent always sees
+    the repo's own project instructions before starting. Returns a formatted
+    block (or '' if none). AGENTS.md is the primary convention; CLAUDE.md is
+    included too when present."""
+    blocks: list[str] = []
+    for name in ("AGENTS.md", "CLAUDE.md"):
+        try:
+            text = Path(repo_path, name).read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            continue
+        if text:
+            blocks.append(
+                f"--- {name} (repository instructions — read and follow these) ---\n"
+                f"{text[:_GUIDANCE_MAX_CHARS]}"
+            )
+    return "\n\n".join(blocks)
 
 
 class GithubSource:
@@ -67,8 +88,12 @@ class GithubSource:
         branch = f"issue-{issue}"
         await prepare_branch(repo_path, branch)
 
+        guidance = read_repo_guidance(repo_path)
+        if guidance:
+            log.info(f"#{issue}: loaded repo instructions ({len(guidance)} chars)")
+
         async with task_container(repo_path, self.cfg.container) as env:
-            graph = build_autofix_graph(self.llm, env, self.cfg)
+            graph = build_autofix_graph(self.llm, env, self.cfg, guidance)
             out = await graph.ainvoke(
                 {
                     "repo": repo, "issue": issue, "kind": kind,
@@ -90,9 +115,10 @@ class GithubSource:
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         comments = await list_issue_comments(repo, issue)
         thread = render_thread(comments)
+        guidance = read_repo_guidance(repo_path)
 
         async with task_container(repo_path, self.cfg.container) as env:
-            graph = build_answer_graph(self.llm, env, self.cfg)
+            graph = build_answer_graph(self.llm, env, self.cfg, guidance)
             out = await graph.ainvoke(
                 {
                     "repo": repo, "issue": issue, "title": task.prompt,
