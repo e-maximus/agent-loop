@@ -294,6 +294,30 @@ async def comment_pr(repo: str, pr_number: int, body: str) -> None:
     )
 
 
+async def pr_review_decision(repo: str, pr_number: int) -> str:
+    """'approved' | 'changes_requested' | 'none', from the latest review per
+    reviewer (GitHub's own review-gating rule: a reviewer's most recent review
+    supersedes their earlier ones). 'changes_requested' wins over 'approved' so
+    an outstanding block is never merged over."""
+    res = await run(
+        "gh", ["api", f"repos/{repo}/pulls/{pr_number}/reviews", "--paginate"],
+        throw_on_error=False,
+    )
+    if res.code != 0:
+        return "none"
+    latest: dict[str, str] = {}
+    for r in json.loads(res.stdout or "[]"):
+        state = (r.get("state") or "").upper()
+        if state in ("APPROVED", "CHANGES_REQUESTED", "DISMISSED"):
+            latest[(r.get("user") or {}).get("login", "")] = state
+    states = set(latest.values())
+    if "CHANGES_REQUESTED" in states:
+        return "changes_requested"
+    if "APPROVED" in states:
+        return "approved"
+    return "none"
+
+
 async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
     res = await run("gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "files"])
     data = json.loads(res.stdout or "{}")

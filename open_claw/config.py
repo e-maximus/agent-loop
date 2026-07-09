@@ -83,6 +83,9 @@ class GithubSourceConfig(BaseModel):
     labels: Labels = Field(default_factory=Labels)
     poll_interval_sec: int = Field(default=120, alias="pollIntervalSec")
     auto_merge: bool = Field(default=False, alias="autoMerge")
+    # When auto-merge is on, also require an approving PR review (and no
+    # outstanding "changes requested") before merging — not just green CI.
+    require_approval: bool = Field(default=True, alias="requireApproval")
     clone_dir: str = Field(default="./data/repos", alias="cloneDir")
     policy: MergePolicy = Field(default_factory=MergePolicy)
     container: ContainerConfig | None = None

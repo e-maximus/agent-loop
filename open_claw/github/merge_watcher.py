@@ -34,6 +34,7 @@ from .gh import (
     pr_checks_state,
     pr_comments,
     pr_failed_check_conclusions,
+    pr_review_decision,
     rerun_failed_runs,
 )
 from .policy import evaluate_diff
@@ -143,6 +144,14 @@ class PrWatcher:
     # ── green + auto-merge: policy gate, then merge ─────────────────────────
     async def _maybe_merge(self, row: TaskRow, meta: dict, pr: int) -> None:
         repo, issue = self.cfg.repo, meta.get("issue")
+
+        # Approval gate: green CI alone is not enough — wait for a human approve.
+        if self.cfg.require_approval:
+            decision = await pr_review_decision(repo, pr)
+            if decision != "approved":
+                self.log.info(f"PR #{pr}: CI green but review is '{decision}' — waiting for approval")
+                return
+
         files = await pr_changed_files(repo, pr)
         verdict = evaluate_diff(files, self.cfg.policy)
         if not verdict.ok:
