@@ -29,10 +29,10 @@ from .gh import (
     comment_pr,
     failures_are_transient,
     is_bot_comment,
-    list_issue_comments,
     merge_pr,
     pr_changed_files,
     pr_checks_state,
+    pr_comments,
     pr_failed_check_conclusions,
     rerun_failed_runs,
 )
@@ -117,7 +117,7 @@ class PrWatcher:
     # ── human comment: route to a worker that answers or reworks ────────────
     async def _handle_new_comment(self, row: TaskRow, meta: dict, pr: int) -> bool:
         repo = self.cfg.repo
-        comments = await list_issue_comments(repo, pr)  # PR is an issue for comments
+        comments = await pr_comments(repo, pr)  # timeline + inline review + reviews
         reviewed_through = meta.get("prReviewedThrough", "")
         new_human = [
             c for c in comments

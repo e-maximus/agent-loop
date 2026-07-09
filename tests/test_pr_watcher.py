@@ -99,7 +99,7 @@ async def test_new_human_comment_queues_rework(monkeypatch):
     patch(
         monkeypatch,
         pr_checks_state=make_async("success"),
-        list_issue_comments=make_async([
+        pr_comments=make_async([
             IssueComment(author="alice", body="Please rename the button", created_at="2024-06-01T10:00:00Z"),
         ]),
         comment_pr=comment_pr,
@@ -124,7 +124,7 @@ async def test_bot_comment_is_ignored(monkeypatch):
     patch(
         monkeypatch,
         pr_checks_state=make_async("success"),
-        list_issue_comments=make_async([
+        pr_comments=make_async([
             IssueComment(author="bot", body="🤖 **open-claw:** opened a PR", created_at="2024-06-01T10:00:00Z"),
         ]),
     )
@@ -145,7 +145,7 @@ async def test_green_within_policy_merges(monkeypatch):
     patch(
         monkeypatch,
         pr_checks_state=make_async("success"),
-        list_issue_comments=make_async([]),
+        pr_comments=make_async([]),
         pr_changed_files=make_async([ChangedFile(file="src/app.ts", added=3, deleted=1)]),
         merge_pr=merge,
         comment_issue=make_async(None),
@@ -166,7 +166,7 @@ async def test_green_but_policy_blocks_hands_off(monkeypatch):
     patch(
         monkeypatch,
         pr_checks_state=make_async("success"),
-        list_issue_comments=make_async([]),
+        pr_comments=make_async([]),
         # Outside allowedGlobs (default src/public/docs) → policy fails.
         pr_changed_files=make_async([ChangedFile(file="ci/deploy.yml", added=5, deleted=0)]),
         merge_pr=merge,
@@ -186,7 +186,7 @@ async def test_green_no_automerge_waits(monkeypatch):
     patch(
         monkeypatch,
         pr_checks_state=make_async("success"),
-        list_issue_comments=make_async([]),
+        pr_comments=make_async([]),
         merge_pr=merge,
     )
 

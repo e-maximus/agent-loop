@@ -35,6 +35,7 @@ from .gh import (
     is_bot_comment,
     issue_author_association,
     list_issue_comments,
+    pr_comments,
     prepare_branch,
 )
 from .merge_watcher import PrWatcher
@@ -243,7 +244,7 @@ class GithubSource:
         branch = meta.get("branch") or f"issue-{issue}"
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         await checkout_existing_branch(repo_path, branch)
-        comments = await list_issue_comments(repo, meta.get("prNumber"))
+        comments = await pr_comments(repo, meta.get("prNumber"))
         thread = render_thread(comments)
         guidance = read_repo_guidance(repo_path)
         async with task_container(repo_path, self.cfg.container) as env:

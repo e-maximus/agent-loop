@@ -259,6 +259,34 @@ async def rerun_failed_runs(repo: str, branch: str) -> bool:
     return triggered
 
 
+async def pr_comments(repo: str, pr_number: int) -> list[IssueComment]:
+    """All human-visible comments on a PR, across the three channels GitHub
+    splits them into: the conversation timeline (issues/:n/comments), inline
+    review comments (pulls/:n/comments), and review summaries
+    (pulls/:n/reviews). Merged and sorted oldest-first. Empty-body entries (e.g.
+    a bare 'Commented' review) are dropped."""
+    out: list[IssueComment] = []
+
+    async def _collect(path: str, ts_field: str) -> None:
+        res = await run("gh", ["api", path, "--paginate"], throw_on_error=False)
+        if res.code != 0:
+            return
+        for c in json.loads(res.stdout or "[]"):
+            body = c.get("body") or ""
+            if body.strip():
+                out.append(IssueComment(
+                    author=(c.get("user") or {}).get("login", "unknown"),
+                    body=body,
+                    created_at=c.get(ts_field) or "",
+                ))
+
+    await _collect(f"repos/{repo}/issues/{pr_number}/comments", "created_at")
+    await _collect(f"repos/{repo}/pulls/{pr_number}/comments", "created_at")
+    await _collect(f"repos/{repo}/pulls/{pr_number}/reviews", "submitted_at")
+    out.sort(key=lambda c: c.created_at)
+    return out
+
+
 async def comment_pr(repo: str, pr_number: int, body: str) -> None:
     await run(
         "gh", ["pr", "comment", str(pr_number), "--repo", repo, "--body", body],
