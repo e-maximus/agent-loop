@@ -23,7 +23,7 @@ async def main() -> None:
 
     orphans = tasks.reset_orphans()
     if orphans:
-        log.warn(f"marked {orphans} interrupted task(s) as failed")
+        log.warn(f"re-queued {orphans} interrupted task(s) to retry from the start")
 
     source_cfgs = load_sources()
     llm = make_llm()

@@ -34,7 +34,7 @@ class Settings(BaseSettings):
     deepseek_model: str = Field(default="deepseek-v4-flash", alias="DEEPSEEK_MODEL")
 
     # Max agent steps per react-loop before it is force-stopped (cost guard).
-    agent_max_turns: int = Field(default=40, alias="AGENT_MAX_TURNS")
+    agent_max_turns: int = Field(default=100, alias="AGENT_MAX_TURNS")
 
     db_path: str = Field(default="./data/open-claw.db", alias="DB_PATH")
     open_claw_config: str = Field(default="./open-claw.config.yaml", alias="OPEN_CLAW_CONFIG")

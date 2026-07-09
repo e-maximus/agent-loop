@@ -14,14 +14,25 @@ from pathlib import Path
 
 from langchain_core.language_models import BaseChatModel
 
-from ..config import GithubSourceConfig
+from langgraph.errors import GraphRecursionError
+
+from ..config import GithubSourceConfig, settings
 from ..container import task_container
 from ..db import TaskRow, tasks
 from ..logging import create_logger, task_log_scope
 from ..queue import Queue
 from .answer_graph import build_answer_graph, render_thread
 from .autofix_graph import build_autofix_graph
-from .gh import default_branch, ensure_clone, is_authenticated, is_bot_comment, list_issue_comments, prepare_branch
+from .gh import (
+    BOT_COMMENT_PREFIX,
+    comment_issue,
+    default_branch,
+    ensure_clone,
+    is_authenticated,
+    is_bot_comment,
+    list_issue_comments,
+    prepare_branch,
+)
 from .merge_watcher import MergeWatcher
 from .poller import GithubPoller
 
@@ -76,9 +87,35 @@ class GithubSource:
         meta = task.meta_dict()
         with task_log_scope("github", f"issue{meta.get('issue')}") as logfile:
             log.info(f"task #{task.id} → {meta.get('kind')} #{meta.get('issue')} (log: {logfile})")
-            if meta.get("kind") == "question":
-                return await self._answer(task, meta)
-            return await self._autofix(task, meta)
+            try:
+                if meta.get("kind") == "question":
+                    return await self._answer(task, meta)
+                return await self._autofix(task, meta)
+            except Exception as err:  # noqa: BLE001 — re-raised after signalling
+                await self._signal_failure(meta, err)
+                raise
+
+    async def _signal_failure(self, meta: dict, err: Exception) -> None:
+        """A failed bug/feature autofix is terminal — the poller will not retry it
+        (`is_github_issue_taken` counts 'failed'). Leave a note on the issue so a
+        human notices and takes over instead of the failure passing silently."""
+        repo, issue, kind = meta.get("repo"), meta.get("issue"), meta.get("kind")
+        if not repo or not issue or kind == "question":
+            return
+        if isinstance(err, GraphRecursionError):
+            reason = (
+                f"the agent hit its step budget ({settings.agent_max_turns} turns) "
+                "without finishing — it may be stuck in a loop or the task may be "
+                "too large to do in one pass."
+            )
+        else:
+            reason = f"`{type(err).__name__}: {err}`"
+        body = (
+            f"{BOT_COMMENT_PREFIX} automated fix attempt **failed** and will not be "
+            f"retried automatically — {reason}\n\nA human needs to take a look."
+        )
+        await comment_issue(repo, issue, body)
+        log.warn(f"#{issue}: signalled failure on the issue thread")
 
     async def _autofix(self, task: TaskRow, meta: dict) -> str | None:
         repo, issue, kind = meta["repo"], meta["issue"], meta["kind"]

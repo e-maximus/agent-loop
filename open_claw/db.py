@@ -102,10 +102,12 @@ class _Tasks:
         _db.commit()
 
     def is_github_issue_taken(self, repo: str, issue: int) -> bool:
-        """Has this issue already been picked up (open work or already done)?"""
+        """Has this issue already been picked up? Bug/feature issues are one-shot:
+        a 'failed' attempt counts as taken too, so a crash is NOT retried in a
+        loop — it is left for a human (see the failure comment on the issue)."""
         r = _db.execute(
             """SELECT id FROM tasks WHERE source = 'github'
-                 AND status IN ('queued','running','done')
+                 AND status IN ('queued','running','done','failed')
                  AND json_extract(meta, '$.repo') = ? AND json_extract(meta, '$.issue') = ?
                LIMIT 1""",
             (repo, issue),
@@ -175,9 +177,12 @@ class _Tasks:
         _db.commit()
 
     def reset_orphans(self) -> int:
-        """On startup, any task left 'running' means the process died mid-flight."""
+        """On startup, any task left 'running' means the process died mid-flight.
+        Put it back on the queue to be retried from the start — an interruption is
+        not a failure, so it must not be treated as a terminal 'failed' attempt
+        (which is never re-run)."""
         cur = _db.execute(
-            "UPDATE tasks SET status = 'failed', error = 'interrupted (process restart)', "
+            "UPDATE tasks SET status = 'queued', "
             "updated_at = datetime('now') WHERE status = 'running'"
         )
         _db.commit()

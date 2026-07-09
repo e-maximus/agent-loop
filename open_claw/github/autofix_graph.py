@@ -84,16 +84,25 @@ def build_autofix_graph(
     async def _run_agent(system: str, user: str, *, include_write: bool) -> str:
         tools = build_tools(env, include_write=include_write)
         agent = create_react_agent(llm, tools, prompt=system + guidance_suffix)
-        result = await agent.ainvoke(
+        # Stream so every tool call is logged the moment it happens. If the run
+        # crashes mid-flight (e.g. it hits the recursion limit), the trace up to
+        # that point survives — otherwise we'd log nothing and never know whether
+        # the agent was stuck in a loop or simply ran out of steps.
+        logged = 0
+        final = ""
+        async for state in agent.astream(
             {"messages": [("user", user)]},
             config={"recursion_limit": _RECURSION},
-        )
-        # Log the tool calls the agent made, for the per-task log.
-        for m in result["messages"]:
-            for call in getattr(m, "tool_calls", None) or []:
-                log.info(f"→ {describe_tool(call['name'], call.get('args', {}))}")
-        final = result["messages"][-1]
-        return final.content.strip() if isinstance(final.content, str) else str(final.content)
+            stream_mode="values",
+        ):
+            messages = state["messages"]
+            for m in messages[logged:]:
+                for call in getattr(m, "tool_calls", None) or []:
+                    log.info(f"→ {describe_tool(call['name'], call.get('args', {}))}")
+            logged = len(messages)
+            last = messages[-1]
+            final = last.content.strip() if isinstance(last.content, str) else str(last.content)
+        return final
 
     async def _ask(system: str, user: str) -> str:
         resp = await llm.ainvoke([("system", system + guidance_suffix), ("user", user)])
