@@ -129,6 +129,18 @@ agent's word:
 — the local verify run is a fast pre-check, the CI run is the authoritative gate
 the PR watcher trusts.
 
+## Tests
+
+Fast, fully mocked unit tests — no network, LLM, or Docker. They cover the PR
+watcher's decision tree (CI re-run, comment→rework/answer, label-gated merge),
+the CI roll-up, the task lifecycle/dedup queries, the queue guard, and the
+intake gate.
+
+```bash
+.venv/bin/pip install -e ".[dev]"   # pytest + pytest-asyncio
+.venv/bin/python -m pytest
+```
+
 ## The model
 
 DeepSeek via LangChain `init_chat_model` ([llm.py](open_claw/llm.py)). The API is
