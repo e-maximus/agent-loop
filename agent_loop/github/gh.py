@@ -16,9 +16,9 @@ from ..logging import create_logger
 
 log = create_logger("github")
 
-# Prefix open-claw prepends to every comment it posts. Used to tell our own
+# Prefix agent-loop prepends to every comment it posts. Used to tell our own
 # replies apart from human comments (bot and repo owner may share a login).
-BOT_COMMENT_PREFIX = "🤖 **open-claw:**"
+BOT_COMMENT_PREFIX = "🤖 **agent-loop:**"
 
 
 @dataclass

@@ -9,10 +9,10 @@ from __future__ import annotations
 
 import pytest
 
-from open_claw.config import GithubSourceConfig
-from open_claw.db import tasks
-from open_claw.github import merge_watcher as mw
-from open_claw.github.gh import ChangedFile, IssueComment
+from agent_loop.config import GithubSourceConfig
+from agent_loop.db import tasks
+from agent_loop.github import merge_watcher as mw
+from agent_loop.github.gh import ChangedFile, IssueComment
 from tests.conftest import make_async
 
 
@@ -153,7 +153,7 @@ async def test_bot_comment_is_ignored(monkeypatch):
         monkeypatch,
         pr_checks_state=make_async("success"),
         pr_comments=make_async([
-            IssueComment(author="bot", body="🤖 **open-claw:** opened a PR", created_at="2024-06-01T10:00:00Z"),
+            IssueComment(author="bot", body="🤖 **agent-loop:** opened a PR", created_at="2024-06-01T10:00:00Z"),
         ]),
     )
 

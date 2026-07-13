@@ -1,4 +1,4 @@
-# open-claw
+# agent-loop
 
 An autonomous GitHub issue **auto-fix** runner on your **local machine**, built
 on **Python + LangGraph**. It polls your repos, and for each labelled issue it
@@ -62,10 +62,10 @@ On **rework** (a review comment asked for changes, or a fix must be pushed to an
 existing PR) the graph re-enters straight at `implement` on the PR branch and
 pushes to it instead of opening a new PR.
 
-Layers: [config.py](open_claw/config.py) · [db.py](open_claw/db.py) ·
-[queue.py](open_claw/queue.py) · [container.py](open_claw/container.py) ·
-[tools.py](open_claw/tools.py) · [github/](open_claw/github/) ·
-[main.py](open_claw/main.py)
+Layers: [config.py](agent_loop/config.py) · [db.py](agent_loop/db.py) ·
+[queue.py](agent_loop/queue.py) · [container.py](agent_loop/container.py) ·
+[tools.py](agent_loop/tools.py) · [github/](agent_loop/github/) ·
+[main.py](agent_loop/main.py)
 
 ## Execution: host or Docker
 
@@ -83,12 +83,12 @@ for container mode — Docker.
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e .
 cp .env.example .env                                     # DEEPSEEK_API_KEY, AGENT_*
-cp open-claw.config.example.yaml open-claw.config.yaml   # declare your repos
-.venv/bin/open-claw        # or: .venv/bin/python -m open_claw.main
+cp agent-loop.config.example.yaml agent-loop.config.yaml   # declare your repos
+.venv/bin/agent-loop        # or: .venv/bin/python -m agent_loop.main
 ```
 
 Secrets and agent settings live in `.env`; the list of GitHub repos lives in
-`open-claw.config.yaml` (reference secrets as `${VAR}`). Each entry under
+`agent-loop.config.yaml` (reference secrets as `${VAR}`). Each entry under
 `sources` is a separate instance with a unique `id`.
 
 ## Issue routing
@@ -106,7 +106,7 @@ question):
 
 Opening a PR does **not** close the task — it moves to `awaiting_review` and is
 closed (`done`) only when the PR merges. The
-[PR watcher](open_claw/github/merge_watcher.py) manages each open PR (it runs
+[PR watcher](agent_loop/github/merge_watcher.py) manages each open PR (it runs
 even when auto-merge is off), deciding from GitHub's own Checks API — never the
 agent's word:
 
@@ -143,9 +143,9 @@ intake gate.
 
 ## The model
 
-DeepSeek via LangChain `init_chat_model` ([llm.py](open_claw/llm.py)). The API is
+DeepSeek via LangChain `init_chat_model` ([llm.py](agent_loop/llm.py)). The API is
 only the "brain" — the tool-use loop is LangGraph's and the tool executor is ours
-([tools.py](open_claw/tools.py)), so a different provider is a one-line change.
+([tools.py](agent_loop/tools.py)), so a different provider is a one-line change.
 
 ## Keeping it alive
 

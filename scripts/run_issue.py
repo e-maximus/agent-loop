@@ -10,11 +10,11 @@ import asyncio
 import json
 import sys
 
-from open_claw.config import load_sources
-from open_claw.db import tasks
-from open_claw.exec import run
-from open_claw.github.source import GithubSource
-from open_claw.llm import make_llm
+from agent_loop.config import load_sources
+from agent_loop.db import tasks
+from agent_loop.exec import run
+from agent_loop.github.source import GithubSource
+from agent_loop.llm import make_llm
 
 
 async def main() -> None:

@@ -5,6 +5,6 @@ __pycache__/
 *.pyc
 data/
 .env
-open-claw.config.yaml
+agent-loop.config.yaml
 *.log
 .DS_Store

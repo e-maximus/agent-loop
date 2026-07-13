@@ -19,7 +19,7 @@ _LEVELS = {"debug": 0, "info": 1, "warn": 2, "error": 3}
 _MIN = os.environ.get("LOG_LEVEL", "info").lower()
 
 LOG_DIR = Path("./data/logs").resolve()
-LOG_FILE = LOG_DIR / "open-claw.log"
+LOG_FILE = LOG_DIR / "agent-loop.log"
 
 _general_stream: TextIO | None = None
 

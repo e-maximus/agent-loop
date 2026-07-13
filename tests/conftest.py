@@ -1,5 +1,5 @@
 """Test bootstrap: point the app at a throwaway SQLite DB and a dummy API key
-BEFORE any open_claw import (config validates the key at import time, and db.py
+BEFORE any agent_loop import (config validates the key at import time, and db.py
 opens its connection at import time). Every test starts from an empty tasks
 table so the global queries (e.g. awaiting_review_prs) are deterministic.
 """
@@ -10,12 +10,12 @@ import os
 import tempfile
 
 os.environ.setdefault("DEEPSEEK_API_KEY", "test-key")
-os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="open-claw-test-"), "test.db")
-os.environ.setdefault("OPEN_CLAW_CONFIG", "/dev/null")
+os.environ["DB_PATH"] = os.path.join(tempfile.mkdtemp(prefix="agent-loop-test-"), "test.db")
+os.environ.setdefault("AGENT_LOOP_CONFIG", "/dev/null")
 
 import pytest  # noqa: E402
 
-from open_claw import db  # noqa: E402
+from agent_loop import db  # noqa: E402
 
 
 @pytest.fixture(autouse=True)

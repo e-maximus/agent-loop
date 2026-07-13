@@ -1,9 +1,9 @@
-# open-claw source configuration.
+# agent-loop source configuration.
 #
 # Each entry under `sources` is one GitHub repo instance with a unique `id`.
 # Secrets are NOT stored here — reference them as ${ENV_VAR} and keep the actual
-# values in .env. Copy this file to open-claw.config.yaml and edit. Override the
-# path with the OPEN_CLAW_CONFIG env var.
+# values in .env. Copy this file to agent-loop.config.yaml and edit. Override the
+# path with the AGENT_LOOP_CONFIG env var.
 
 sources:
   # ── GitHub: polls a repo and acts on labelled issues ──

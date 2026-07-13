@@ -4,8 +4,8 @@ the runner deliberately set."""
 
 from __future__ import annotations
 
-from open_claw.db import tasks
-from open_claw.queue import Queue
+from agent_loop.db import tasks
+from agent_loop.queue import Queue
 
 
 def _mk(issue, status, **meta):

@@ -6,7 +6,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
-from open_claw.github import gh
+from agent_loop.github import gh
 
 
 def fake_run(stdout="", code=0):
@@ -63,6 +63,6 @@ async def test_pr_failed_check_conclusions(monkeypatch):
 
 
 def test_is_bot_comment():
-    assert gh.is_bot_comment("🤖 **open-claw:** hi") is True
+    assert gh.is_bot_comment("🤖 **agent-loop:** hi") is True
     assert gh.is_bot_comment("  🤖 leading space") is True
     assert gh.is_bot_comment("a human comment") is False

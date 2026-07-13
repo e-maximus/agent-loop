@@ -204,7 +204,7 @@ class PrWatcher:
         await merge_pr(repo, pr)
         tasks.set_meta(row.id, {**meta, "prState": "merged"})
         tasks.finish_done(row.id, f"Merged PR #{pr} (CI green, policy passed).")
-        await comment_issue(repo, issue, f"✅ open-claw merged PR #{pr} (CI green, policy passed).")
+        await comment_issue(repo, issue, f"✅ agent-loop merged PR #{pr} (CI green, policy passed).")
 
     async def _handoff(self, row: TaskRow, meta: dict, comment: str) -> None:
         """Mark a PR as needing a human: the task stays awaiting_review (not

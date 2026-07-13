@@ -18,7 +18,7 @@ log = create_logger("main")
 
 
 async def main() -> None:
-    log.info("open-claw starting…")
+    log.info("agent-loop starting…")
     log.info(f"provider: deepseek, model: {settings.deepseek_model}, max turns: {settings.agent_max_turns}")
 
     orphans = tasks.reset_orphans()

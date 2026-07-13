@@ -5,10 +5,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-from open_claw.config import GithubSourceConfig
-from open_claw.db import tasks
-from open_claw.github import source as source_mod
-from open_claw.github.source import GithubSource
+from agent_loop.config import GithubSourceConfig
+from agent_loop.db import tasks
+from agent_loop.github import source as source_mod
+from agent_loop.github.source import GithubSource
 from tests.conftest import make_async
 
 

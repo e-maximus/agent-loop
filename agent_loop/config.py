@@ -36,14 +36,14 @@ class Settings(BaseSettings):
     # Max agent steps per react-loop before it is force-stopped (cost guard).
     agent_max_turns: int = Field(default=100, alias="AGENT_MAX_TURNS")
 
-    db_path: str = Field(default="./data/open-claw.db", alias="DB_PATH")
-    open_claw_config: str = Field(default="./open-claw.config.yaml", alias="OPEN_CLAW_CONFIG")
+    db_path: str = Field(default="./data/agent-loop.db", alias="DB_PATH")
+    agent_loop_config: str = Field(default="./agent-loop.config.yaml", alias="AGENT_LOOP_CONFIG")
 
 
 settings = Settings()
 
 DB_PATH = Path(settings.db_path).resolve()
-CONFIG_PATH = Path(settings.open_claw_config).resolve()
+CONFIG_PATH = Path(settings.agent_loop_config).resolve()
 
 if not settings.deepseek_api_key:
     print("\n✖ DEEPSEEK_API_KEY is empty. Set it in .env.\n", file=sys.stderr)
@@ -139,7 +139,7 @@ def load_sources() -> list[GithubSourceConfig]:
     if not CONFIG_PATH.exists():
         print(
             f"\n✖ Config file not found: {CONFIG_PATH}\n"
-            "  Create it (see open-claw.config.example.yaml) or set OPEN_CLAW_CONFIG.\n",
+            "  Create it (see agent-loop.config.example.yaml) or set AGENT_LOOP_CONFIG.\n",
             file=sys.stderr,
         )
         sys.exit(1)

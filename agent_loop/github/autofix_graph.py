@@ -226,7 +226,7 @@ def build_autofix_graph(
                     f"{gh.BOT_COMMENT_PREFIX}\n\nI looked at the feedback but did not find a change to make.\n\n{s.get('diff_text', '')[:2000]}",
                 )
                 return {"result": "Rework: no changes.", "pr_number": pr_number, "pr_url": pr_url}
-            await gh.commit_all(repo_path, f"fix: address review feedback on #{issue}\n\n🤖 open-claw")
+            await gh.commit_all(repo_path, f"fix: address review feedback on #{issue}\n\n🤖 agent-loop")
             await gh.push(repo_path, s["branch"])
             await gh.comment_pr(
                 repo, pr_number,
@@ -239,16 +239,16 @@ def build_autofix_graph(
             log.warn(f"#{issue}: no changes")
             await gh.comment_issue(
                 repo, issue,
-                f"{gh.BOT_COMMENT_PREFIX}\n\nopen-claw made no changes for this task.\n\n{s.get('diff_text', '')[:3000]}",
+                f"{gh.BOT_COMMENT_PREFIX}\n\nagent-loop made no changes for this task.\n\n{s.get('diff_text', '')[:3000]}",
             )
             return {"result": f"No changes. {s.get('diff_text', '')[:500]}"}
 
         prefix = "feat" if kind == "feature" else "fix"
         title = f"{prefix}: {s['title']}"[:100]
-        await gh.commit_all(repo_path, f"{title}\n\nCloses #{issue}\n\n🤖 open-claw")
+        await gh.commit_all(repo_path, f"{title}\n\nCloses #{issue}\n\n🤖 agent-loop")
         await gh.push(repo_path, s["branch"])
 
-        body = f"Automated {'feature' if kind == 'feature' else 'fix'} for issue #{issue} by open-claw.\n\nCloses #{issue}\n\n---\n{summary[:3000]}{human}"
+        body = f"Automated {'feature' if kind == 'feature' else 'fix'} for issue #{issue} by agent-loop.\n\nCloses #{issue}\n\n---\n{summary[:3000]}{human}"
         pr = await gh.open_pr(repo_path, base=s["base"], title=title, body=body)
 
         await gh.comment_issue(
