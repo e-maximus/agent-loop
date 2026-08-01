@@ -48,6 +48,14 @@ echo "→ installing into $ROOT/.venv ($("$PYTHON_BIN" -V))"
 
 mkdir -p "$ROOT/data/logs"
 
+# Seed the deploy stamp from what we just installed, so the watcher sees the
+# checkout as current and traces are stamped with a real commit from run one.
+if [ ! -f "$ROOT/data/deployed.sha" ]; then
+    git -C "$ROOT" rev-parse HEAD >"$ROOT/data/deployed.sha"
+    sed -n 's/^version = "\(.*\)"/\1/p' "$ROOT/pyproject.toml" | head -1 \
+        >"$ROOT/data/deployed.version"
+fi
+
 # ── Secrets and sources: gitignored, so they survive `git reset --hard` ────
 for f in .env agent-loop.config.yaml; do
     if [ ! -f "$ROOT/$f" ]; then
