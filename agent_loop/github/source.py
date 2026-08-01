@@ -36,6 +36,7 @@ from .gh import (
     is_authenticated,
     is_bot_comment,
     issue_author_association,
+    issue_branch,
     list_issue_comments,
     pr_comments,
     prepare_branch,
@@ -72,11 +73,20 @@ def read_repo_guidance(repo_path: str) -> str:
 class GithubSource:
     type = "github"
 
-    def __init__(self, cfg: GithubSourceConfig, queue: Queue, llm: BaseChatModel) -> None:
+    def __init__(
+        self,
+        cfg: GithubSourceConfig,
+        queue: Queue,
+        llm: BaseChatModel,
+        strong_llm: BaseChatModel | None = None,
+    ) -> None:
         cfg.clone_dir = os.path.abspath(cfg.clone_dir)
         self.cfg = cfg
         self.id = cfg.id
         self.llm = llm
+        # Used by the autofix graph for implement and critic only. Defaults to
+        # the same model, so a caller that has one model still works.
+        self.strong_llm = strong_llm or llm
         self.poller = GithubPoller(cfg, queue)
         self.watcher = PrWatcher(cfg, queue)
 
@@ -181,7 +191,7 @@ class GithubSource:
 
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         base = await default_branch(repo)
-        branch = meta.get("branch") or f"issue-{issue}"
+        branch = meta.get("branch") or issue_branch(issue)
         if mode == "rework":
             await checkout_existing_branch(repo_path, branch)
         else:
@@ -207,7 +217,7 @@ class GithubSource:
             )
 
         async with task_container(repo_path, self.cfg.container) as env:
-            graph = build_autofix_graph(self.llm, env, self.cfg, guidance)
+            graph = build_autofix_graph(self.llm, env, self.cfg, guidance, self.strong_llm)
             out = await graph.ainvoke(
                 state,
                 config={
@@ -271,7 +281,7 @@ class GithubSource:
     async def _answer_pr(self, task: TaskRow, meta: dict) -> str:
         """Answer a question comment grounded in the PR branch code."""
         repo, issue = meta["repo"], meta["issue"]
-        branch = meta.get("branch") or f"issue-{issue}"
+        branch = meta.get("branch") or issue_branch(issue)
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         await checkout_existing_branch(repo_path, branch)
         comments = await pr_comments(repo, meta.get("prNumber"))

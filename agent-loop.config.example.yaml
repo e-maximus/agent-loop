@@ -27,6 +27,12 @@ sources:
       - npm run lint
       - npm run build
       - npx playwright test
+    # Run those commands once on the base branch first, before anything is
+    # written: a suite that is already red there (no database, no API key in the
+    # container) cannot be the change's fault, so it is skipped when verifying
+    # the diff and named in the PR body instead of eating all three fix cycles.
+    # Costs one extra pass over the suite per task — set false where too slow.
+    baselineVerify: true
     # Optional security scanners run by the diff-security node (after the critic).
     # Any non-zero exit is treated as a finding and loops back to implement. The
     # node also always does an LLM security review of the diff, so this may be

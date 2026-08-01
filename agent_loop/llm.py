@@ -13,11 +13,17 @@ from langchain_core.language_models import BaseChatModel
 from .config import settings
 
 
-def make_llm() -> BaseChatModel:
+def make_llm(model: str | None = None) -> BaseChatModel:
     return init_chat_model(
-        settings.deepseek_model,
+        model or settings.deepseek_model,
         model_provider="deepseek",
         api_key=settings.deepseek_api_key,
         api_base=settings.deepseek_base_url,
         temperature=0,
     )
+
+
+def make_strong_llm() -> BaseChatModel:
+    """The model for implement and critic — see DEEPSEEK_MODEL_STRONG in
+    config.py for why those two nodes get their own."""
+    return make_llm(settings.deepseek_model_strong)

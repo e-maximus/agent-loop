@@ -54,10 +54,19 @@ class IssueComment:
 class PullRequest:
     number: int
     url: str
+    # True when open_pr adopted a PR that already existed for the branch rather
+    # than creating one — the caller updates its body instead of leaving stale text.
+    existing: bool = False
 
 
 def is_bot_comment(body: str) -> bool:
     return body.lstrip().startswith("🤖")
+
+
+def issue_branch(issue: int) -> str:
+    """The branch an issue's work lives on. One naming rule, because the poller
+    looks a PR up by it before the task that would create it exists."""
+    return f"issue-{issue}"
 
 
 def _repo_dir_name(repo: str) -> str:
@@ -169,14 +178,60 @@ async def push(repo_path: str, branch: str) -> None:
     await run("git", ["push", "-u", "origin", branch, "--force-with-lease"], cwd=repo_path)
 
 
-async def open_pr(repo_path: str, *, base: str, title: str, body: str) -> PullRequest:
+async def find_open_pr(repo: str, branch: str) -> PullRequest | None:
+    """The open PR whose head is `branch`, if there is one. GitHub — not the
+    task DB — is the source of truth for whether an issue is already handled:
+    the DB can be reset or lost, the PR cannot."""
+    res = await run(
+        "gh",
+        ["pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number,url"],
+        throw_on_error=False,
+    )
+    if res.code != 0:
+        return None
+    try:
+        items = json.loads(res.stdout or "[]")
+    except json.JSONDecodeError:
+        return None
+    for it in items:
+        if it.get("url"):
+            return PullRequest(number=int(it.get("number") or 0), url=it["url"])
+    return None
+
+
+async def open_pr(
+    repo_path: str, *, base: str, title: str, body: str, repo: str = "", head: str = ""
+) -> PullRequest:
     res = await run(
         "gh", ["pr", "create", "--base", base, "--title", title, "--body", body],
-        cwd=repo_path,
+        cwd=repo_path, throw_on_error=False,
     )
-    url = res.stdout.strip().split("\n")[-1] if res.stdout.strip() else ""
-    number = int(url.split("/")[-1]) if url.split("/")[-1].isdigit() else 0
-    return PullRequest(number=number, url=url)
+    if res.code == 0:
+        url = res.stdout.strip().split("\n")[-1] if res.stdout.strip() else ""
+        number = int(url.split("/")[-1]) if url.split("/")[-1].isdigit() else 0
+        return PullRequest(number=number, url=url)
+
+    # A PR for this branch may already exist — the same issue re-run after the
+    # task DB was reset, or a crash between push and create. The push above
+    # already put this work on the branch, so the existing PR now carries it:
+    # adopt it instead of throwing away a completed run.
+    if repo and head:
+        existing = await find_open_pr(repo, head)
+        if existing:
+            log.info(f"PR for {head} already exists — reusing {existing.url}")
+            return PullRequest(number=existing.number, url=existing.url, existing=True)
+    detail = (res.stderr or res.stdout).strip()
+    raise RuntimeError(f"`gh pr create` failed (exit {res.code}):\n{detail}")
+
+
+async def update_pr(repo: str, pr_number: int, *, title: str, body: str) -> None:
+    """Refresh an adopted PR's title/body so it describes the run that just
+    pushed to it, not the one that opened it."""
+    await run(
+        "gh",
+        ["pr", "edit", str(pr_number), "--repo", repo, "--title", title, "--body", body],
+        throw_on_error=False,
+    )
 
 
 # ── merge-watcher side ─────────────────────────────────────────────────────

@@ -13,7 +13,14 @@ from ..config import GithubSourceConfig
 from ..db import tasks
 from ..logging import create_logger
 from ..queue import Queue
-from .gh import Issue, is_bot_comment, list_issue_comments, list_open_issues
+from .gh import (
+    Issue,
+    find_open_pr,
+    is_bot_comment,
+    issue_branch,
+    list_issue_comments,
+    list_open_issues,
+)
 
 
 class GithubPoller:
@@ -22,6 +29,8 @@ class GithubPoller:
         self.queue = queue
         self.log = create_logger(f"gh-poller:{cfg.id}")
         self._task: asyncio.Task[None] | None = None
+        # Issues GitHub says we already handled but the task DB has no row for.
+        self._handled: set[int] = set()
 
     def _classify(self, issue: Issue) -> str | None:
         """Priority: bug > feature > question."""
@@ -69,18 +78,42 @@ class GithubPoller:
             did = (
                 await self._consider_question(repo, issue)
                 if kind == "question"
-                else self._consider_fixable(repo, issue, kind)
+                else await self._consider_fixable(repo, issue, kind)
             )
             if did:
                 enqueued += 1
         if enqueued:
             self.queue.poke()
 
-    def _consider_fixable(self, repo: str, issue: Issue, kind: str) -> bool:
+    async def _consider_fixable(self, repo: str, issue: Issue, kind: str) -> bool:
         """Bug/feature issues are one-shot: enqueue once, never again."""
         if tasks.is_github_issue_taken(repo, issue.number):
             return False
+        if await self._handled_on_github(repo, issue):
+            return False
         self._enqueue(repo, issue, kind)
+        return True
+
+    async def _handled_on_github(self, repo: str, issue: Issue) -> bool:
+        """Second opinion for an issue the task DB has never seen: does GitHub
+        already show our work on it? The DB is local and can be reset or lost —
+        re-running then costs a full LLM pass and collides with our own open PR.
+        Cached per process so a permanently-handled issue is one API call, not
+        one per poll."""
+        if issue.number in self._handled:
+            return True
+
+        pr = await find_open_pr(repo, issue_branch(issue.number))
+        if pr is None:
+            comments = await list_issue_comments(repo, issue.number)
+            if not any(is_bot_comment(c.body) for c in comments):
+                return False
+            reason = "we already commented on it"
+        else:
+            reason = f"PR {pr.url} is open for it"
+
+        self._handled.add(issue.number)
+        self.log.info(f"skipping #{issue.number}: not in the task DB, but {reason}")
         return True
 
     async def _consider_question(self, repo: str, issue: Issue) -> bool:
