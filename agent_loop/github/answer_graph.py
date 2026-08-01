@@ -10,9 +10,9 @@ from __future__ import annotations
 
 from typing import Any, TypedDict
 
+from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
 
 from ..config import GithubSourceConfig, settings
 from ..container import ExecEnv
@@ -56,10 +56,10 @@ def build_answer_graph(
     async def answer(s: AnswerState) -> dict[str, Any]:
         log.info(f"#{s['issue']} answer")
         tools = build_tools(env, include_write=False)  # read-only
-        agent = create_react_agent(
+        agent = create_agent(
             llm,
             tools,
-            prompt=prompts.answer_prompt(cfg.labels.bug, cfg.labels.feature) + guidance_suffix,
+            system_prompt=prompts.answer_prompt(cfg.labels.bug, cfg.labels.feature) + guidance_suffix,
         )
         user = (
             f"Answer this GitHub issue (a question).\n\nTitle: {s['title']}\n\n"

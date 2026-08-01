@@ -97,6 +97,11 @@ class GithubSourceConfig(BaseModel):
         default=["npm run lint", "npm run build", "npx playwright test"],
         alias="verifyCommands",
     )
+    # Add an "agent-loop" trailer to commit messages and a byline to PR bodies.
+    # Some repos forbid AI attribution in git artifacts (goals-app's AGENTS.md
+    # does) — turn this off there. Issue/PR *comments* keep their 🤖 prefix
+    # regardless: that is how the bot recognises its own comments later.
+    git_attribution: bool = Field(default=True, alias="gitAttribution")
     # Optional security scanners run by the diff-security node (after critic).
     # Empty by default — the node still does an LLM review of the diff. Any
     # command exiting non-zero is treated as a security finding.

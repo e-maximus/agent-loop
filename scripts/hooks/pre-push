@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# Refuse to push straight to main. The branch ruleset on GitHub enforces this
+# anyway; the hook just tells you before the network round-trip.
+#
+# Install: scripts/install-hooks.sh
+
+while read -r _local_ref _local_sha remote_ref _remote_sha; do
+    if [ "$remote_ref" = "refs/heads/main" ]; then
+        echo "✖ direct push to main is blocked — open a PR from a branch." >&2
+        echo "  git switch -c <branch> && git push -u origin <branch> && gh pr create" >&2
+        exit 1
+    fi
+done
+
+exit 0

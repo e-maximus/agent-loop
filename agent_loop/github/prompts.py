@@ -137,7 +137,11 @@ If REVISE, add 1-3 short bullet points telling the implementer exactly what to f
 
 
 def summarize_prompt() -> str:
-    return f"""Given the issue and the diff, write a concise PR description: what was wrong (or requested), what you changed, and how it was verified (lint/build/e2e). A few short paragraphs or bullets. No preamble. {ENGLISH_ONLY}"""
+    return f"""Given the issue and the diff, write a concise PR description: what was wrong (or requested), what you changed, and how it was verified.
+
+For the verification part, use ONLY the "verification (authoritative)" block you are given — it is the orchestrator's own result. Never claim a check passed because you ran something similar yourself while implementing; if the block says checks are failing, say so plainly and name what is red.
+
+A few short paragraphs or bullets. No preamble. {ENGLISH_ONLY}"""
 
 
 def answer_prompt(bug_label: str, feature_label: str) -> str:

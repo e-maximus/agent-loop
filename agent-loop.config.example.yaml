@@ -15,11 +15,14 @@ sources:
     autoMerge: false                      # auto-merge green PRs that pass the policy
     requireApproval: true                 # + also require human approval before merging
     approveLabel: auto-merge              # approval = this label on the PR (or an approving review)
+    gitAttribution: true                  # false: no "agent-loop" trailer in commits / PR bodies
     cloneDir: ./data/repos
     policy:
       allowedGlobs: [src/**, public/**, docs/**, e2e/**, tests/**]
       maxChangedLines: 300
-    # Commands run by the verify node (lint + build + e2e). Any red → loop back.
+    # Commands run by the verify node. Any red → loop back to implement (bounded).
+    # Mirror what the repo's CI runs, and order them cheapest-first: verify stops
+    # at the first failure, so a red lint shouldn't wait for the e2e suite.
     verifyCommands:
       - npm run lint
       - npm run build
@@ -34,6 +37,13 @@ sources:
     # Opt-in Docker: agent Bash/build/tests run inside this image via docker
     # exec. Omit the whole block to execute on the host instead. Use a
     # Playwright image so e2e browsers are present.
+    # Note the container has its OWN localhost: a database published on the host
+    # is not reachable as `localhost` from inside it. Reach the host gateway and
+    # pass the connection string the repo's tests read, e.g.
+    #   runArgs:
+    #     - --add-host=host.docker.internal:host-gateway
+    #     - -e
+    #     - TEST_DATABASE_URL=postgres://user:pass@host.docker.internal:5432/app_test
     container:
       image: mcr.microsoft.com/playwright:v1.50.0-noble
       # runArgs: ["--network", "host"]

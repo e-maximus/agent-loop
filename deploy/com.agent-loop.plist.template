@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agent-loop</string>
+
+    <!-- Absolute path: launchd has no venv and no shell profile. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>@ROOT@/.venv/bin/agent-loop</string>
+    </array>
+
+    <!-- Required, not cosmetic: .env, ./data/agent-loop.db and ./data/logs are
+         all resolved relative to the working directory. -->
+    <key>WorkingDirectory</key>
+    <string>@ROOT@</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- launchd starts with a bare PATH. gh lives in Homebrew, docker in
+             /usr/local/bin, node/npm under ~/.local/bin — without all three the
+             source disables itself or every verify run goes red. -->
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:@HOME@/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>LANG</key>
+        <string>en_US.UTF-8</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- Don't hot-loop if it dies on startup (e.g. Docker Desktop not up yet). -->
+    <key>ThrottleInterval</key>
+    <integer>30</integer>
+
+    <key>StandardOutPath</key>
+    <string>@ROOT@/data/logs/daemon.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@ROOT@/data/logs/daemon.err.log</string>
+</dict>
+</plist>

@@ -13,12 +13,13 @@ from .github.source import GithubSource
 from .llm import make_llm
 from .logging import create_logger
 from .queue import Queue
+from .version import BUILD
 
 log = create_logger("main")
 
 
 async def main() -> None:
-    log.info("agent-loop starting…")
+    log.info(f"agent-loop {BUILD} starting…")
     log.info(f"provider: deepseek, model: {settings.deepseek_model}, max turns: {settings.agent_max_turns}")
 
     orphans = tasks.reset_orphans()
