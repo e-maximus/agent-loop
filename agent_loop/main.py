@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import signal
 
-from .config import load_sources, settings
+from .config import get_settings, load_sources, require_api_key
 from .db import tasks
 from .github.source import GithubSource
 from .llm import make_llm, make_strong_llm
@@ -19,6 +19,8 @@ log = create_logger("main")
 
 
 async def main() -> None:
+    require_api_key()
+    settings = get_settings()
     log.info(f"agent-loop {BUILD} starting…")
     log.info(
         f"provider: deepseek, model: {settings.deepseek_model} "
@@ -28,7 +30,7 @@ async def main() -> None:
 
     orphans = tasks.reset_orphans()
     if orphans:
-        log.warn(f"re-queued {orphans} interrupted task(s) to retry from the start")
+        log.warning(f"re-queued {orphans} interrupted task(s) to retry from the start")
 
     source_cfgs = load_sources()
     llm = make_llm()

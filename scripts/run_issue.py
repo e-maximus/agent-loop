@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import traceback
 
 from agent_loop.config import load_sources
 from agent_loop.db import tasks
@@ -33,12 +34,15 @@ async def main() -> None:
         ["issue", "view", str(issue_no), "--repo", cfg.repo, "--json", "number,title,body,url,labels"],
     )
     data = json.loads(res.stdout)
-    labels = [l["name"] for l in data.get("labels", [])]
+    labels = [lbl["name"] for lbl in data.get("labels", [])]
     lb = cfg.labels
     kind = (
-        "bug" if lb.bug in labels
-        else "feature" if lb.feature in labels
-        else "question" if lb.question in labels
+        "bug"
+        if lb.bug in labels
+        else "feature"
+        if lb.feature in labels
+        else "question"
+        if lb.question in labels
         else None
     )
     if not kind:
@@ -46,8 +50,12 @@ async def main() -> None:
         sys.exit(1)
 
     meta = {
-        "sourceId": cfg.id, "repo": cfg.repo, "issue": issue_no, "kind": kind,
-        "url": data["url"], "body": data.get("body") or "",
+        "sourceId": cfg.id,
+        "repo": cfg.repo,
+        "issue": issue_no,
+        "kind": kind,
+        "url": data["url"],
+        "body": data.get("body") or "",
     }
     task = tasks.create("github", data["title"], cfg.clone_dir, meta)
     print(f"→ task #{task.id}: {kind} #{issue_no} — {data['title']}")
@@ -58,8 +66,6 @@ async def main() -> None:
         tasks.finish_done(task.id, result)
         print(f"\n✓ DONE\n{result}")
     except Exception as err:
-        import traceback
-
         tasks.finish_failed(task.id, "".join(traceback.format_exception(err)))
         print(f"\n✗ FAILED\n{err}", file=sys.stderr)
         raise

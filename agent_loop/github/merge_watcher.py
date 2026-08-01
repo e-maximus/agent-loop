@@ -20,11 +20,12 @@ from __future__ import annotations
 import asyncio
 
 from ..config import GithubSourceConfig
-from ..db import TaskRow, tasks
+from ..db import TaskMeta, TaskRow, tasks
 from ..logging import create_logger
 from ..queue import Queue
 from .gh import (
     BOT_COMMENT_PREFIX,
+    IssueComment,
     comment_issue,
     comment_pr,
     failures_are_transient,
@@ -41,7 +42,7 @@ from .gh import (
 from .policy import evaluate_diff
 
 
-def _format_feedback(comments: list) -> str:
+def _format_feedback(comments: list[IssueComment]) -> str:
     """Render new review comments into rework feedback, preserving each inline
     comment's file/line anchor and hunk so the agent edits the exact spot."""
     blocks: list[str] = []
@@ -114,37 +115,44 @@ class PrWatcher:
             if state == "success" and self.cfg.auto_merge:
                 await self._maybe_merge(row, meta, pr)
             elif state == "none" and self.cfg.auto_merge:
-                await self._handoff(row, meta, f"🤖 PR #{pr} has no CI checks — cannot auto-merge, leaving it for review.")
+                await self._handoff(
+                    row, meta, f"🤖 PR #{pr} has no CI checks — cannot auto-merge, leaving it for review."
+                )
 
     # ── CI failure: exactly one automatic re-run, then a human ──────────────
-    async def _handle_ci_failure(self, row: TaskRow, meta: dict, pr: int) -> None:
-        repo, issue, branch = self.cfg.repo, meta.get("issue"), meta.get("branch", "")
+    async def _handle_ci_failure(self, row: TaskRow, meta: TaskMeta, pr: int) -> None:
+        repo, branch = self.cfg.repo, meta.get("branch", "")
         if meta.get("ciRerunCount", 0) < 1:
             conclusions = await pr_failed_check_conclusions(repo, pr)
             triggered = await rerun_failed_runs(repo, branch)
             tasks.set_meta(row.id, {**meta, "ciRerunCount": 1})
             kind = "transient (cancelled/timed-out)" if failures_are_transient(conclusions) else "failing"
-            tail = "re-running the failed jobs once" if triggered else "but I could not trigger a re-run automatically"
+            tail = (
+                "re-running the failed jobs once"
+                if triggered
+                else "but I could not trigger a re-run automatically"
+            )
             self.log.info(f"PR #{pr}: CI {kind} ({','.join(conclusions) or '?'}) — {tail}")
             await comment_pr(
-                repo, pr,
+                repo,
+                pr,
                 f"{BOT_COMMENT_PREFIX}\n\nCI is {kind} ({', '.join(conclusions) or 'unknown'}); {tail}.",
             )
         else:
-            self.log.warn(f"PR #{pr}: CI still red after one re-run — handing off")
+            self.log.warning(f"PR #{pr}: CI still red after one re-run — handing off")
             await self._handoff(
-                row, meta,
+                row,
+                meta,
                 f"🤖 CI is still red on PR #{pr} after one automatic re-run — leaving it for manual review.",
             )
 
     # ── human comment: route to a worker that answers or reworks ────────────
-    async def _handle_new_comment(self, row: TaskRow, meta: dict, pr: int) -> bool:
+    async def _handle_new_comment(self, row: TaskRow, meta: TaskMeta, pr: int) -> bool:
         repo = self.cfg.repo
         comments = await pr_comments(repo, pr)  # timeline + inline review + reviews
         reviewed_through = meta.get("prReviewedThrough", "")
         new_human = sorted(
-            (c for c in comments
-             if not is_bot_comment(c.body) and c.created_at > reviewed_through),
+            (c for c in comments if not is_bot_comment(c.body) and c.created_at > reviewed_through),
             key=lambda c: c.created_at,
         )
         if not new_human:
@@ -169,7 +177,7 @@ class PrWatcher:
         return True
 
     # ── green + auto-merge: policy gate, then merge ─────────────────────────
-    async def _maybe_merge(self, row: TaskRow, meta: dict, pr: int) -> None:
+    async def _maybe_merge(self, row: TaskRow, meta: TaskMeta, pr: int) -> None:
         repo, issue = self.cfg.repo, meta.get("issue")
 
         # Approval gate: green CI alone is not enough. Approval is signalled by
@@ -191,10 +199,11 @@ class PrWatcher:
         files = await pr_changed_files(repo, pr)
         verdict = evaluate_diff(files, self.cfg.policy)
         if not verdict.ok:
-            self.log.warn(f"PR #{pr}: policy blocked — {'; '.join(verdict.reasons)}")
+            self.log.warning(f"PR #{pr}: policy blocked — {'; '.join(verdict.reasons)}")
             reasons = "\n- ".join(verdict.reasons)
             await self._handoff(
-                row, meta,
+                row,
+                meta,
                 f"🤖 CI is green, but the auto-merge policy did not pass:\n- {reasons}\n\n"
                 f"Leaving PR #{pr} for manual review.",
             )
@@ -206,7 +215,7 @@ class PrWatcher:
         tasks.finish_done(row.id, f"Merged PR #{pr} (CI green, policy passed).")
         await comment_issue(repo, issue, f"✅ agent-loop merged PR #{pr} (CI green, policy passed).")
 
-    async def _handoff(self, row: TaskRow, meta: dict, comment: str) -> None:
+    async def _handoff(self, row: TaskRow, meta: TaskMeta, comment: str) -> None:
         """Mark a PR as needing a human: the task stays awaiting_review (not
         closed — only a merge closes it) but the watcher stops acting on it."""
         tasks.set_meta(row.id, {**meta, "prState": "manual"})

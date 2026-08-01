@@ -1,0 +1,24 @@
+version: 2
+
+# Grouped and monthly on purpose. Every merged bump is a candidate deploy to a
+# machine that reinstalls itself, so the goal is a small number of reviewable
+# PRs — not a stream of single-package bumps that get rubber-stamped.
+#
+# A merged bump does not ship on its own: constraints.txt still pins what the
+# watcher installs, and `version` in pyproject.toml still gates the rollout.
+updates:
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      langchain:
+        patterns: ["langchain*", "langgraph*"]
+      dev-tooling:
+        patterns: ["pytest*", "ruff", "pyright"]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly

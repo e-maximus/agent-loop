@@ -11,21 +11,21 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any
+from typing import cast
 
 from langchain_core.language_models import BaseChatModel
-
+from langchain_core.runnables import RunnableConfig
 from langgraph.errors import GraphRecursionError
 
-from ..config import GithubSourceConfig, settings
+from ..config import GithubSourceConfig, get_settings
 from ..container import task_container
-from ..db import TaskRow, tasks
+from ..db import TaskMeta, TaskRow, tasks
 from ..logging import create_logger, task_log_scope
 from ..queue import Queue
 from ..version import trace_config
-from .answer_graph import build_answer_graph, render_thread
-from .autofix_graph import build_autofix_graph
 from . import prompts
+from .answer_graph import build_answer_graph, render_thread
+from .autofix_graph import AutofixState, build_autofix_graph
 from .gh import (
     BOT_COMMENT_PREFIX,
     checkout_existing_branch,
@@ -92,7 +92,7 @@ class GithubSource:
 
     async def start(self) -> None:
         if not await is_authenticated():
-            log.warn(f"[{self.id}] gh is not authenticated — run `gh auth login`. Source disabled.")
+            log.warning(f"[{self.id}] gh is not authenticated — run `gh auth login`. Source disabled.")
             return
         self.poller.start()
         self.watcher.start()
@@ -111,11 +111,11 @@ class GithubSource:
                 if meta.get("kind") == "question":
                     return await self._answer(task, meta)
                 return await self._autofix(task, meta)
-            except Exception as err:  # noqa: BLE001 — re-raised after signalling
+            except Exception as err:
                 await self._signal_failure(meta, err)
                 raise
 
-    async def _signal_failure(self, meta: dict, err: Exception) -> None:
+    async def _signal_failure(self, meta: TaskMeta, err: Exception) -> None:
         """A failed bug/feature autofix is terminal — the poller will not retry it
         (`is_github_issue_taken` counts 'failed'). Leave a note on the issue so a
         human notices and takes over instead of the failure passing silently."""
@@ -124,7 +124,7 @@ class GithubSource:
             return
         if isinstance(err, GraphRecursionError):
             reason = (
-                f"the agent hit its step budget ({settings.agent_max_turns} turns) "
+                f"the agent hit its step budget ({get_settings().agent_max_turns} turns) "
                 "without finishing — it may be stuck in a loop or the task may be "
                 "too large to do in one pass."
             )
@@ -135,9 +135,9 @@ class GithubSource:
             f"retried automatically — {reason}\n\nA human needs to take a look."
         )
         await comment_issue(repo, issue, body)
-        log.warn(f"#{issue}: signalled failure on the issue thread")
+        log.warning(f"#{issue}: signalled failure on the issue thread")
 
-    def _trace(self, task: TaskRow, meta: dict, stage: str) -> dict[str, Any]:
+    def _trace(self, task: TaskRow, meta: TaskMeta, stage: str) -> RunnableConfig:
         """LangSmith config for a call that starts a trace: build identity plus
         the task it belongs to, so a run is findable by issue rather than by
         timestamp. Children of a graph run inherit it."""
@@ -150,7 +150,11 @@ class GithubSource:
             kind=meta.get("kind"),
         )
 
-    async def _triage(self, task: TaskRow, meta: dict) -> tuple[bool, str]:
+    def _graph_config(self, task: TaskRow, meta: TaskMeta, stage: str) -> RunnableConfig:
+        """Trace identity plus the super-step budget, as one config object."""
+        return cast("RunnableConfig", {"recursion_limit": _GRAPH_RECURSION, **self._trace(task, meta, stage)})
+
+    async def _triage(self, task: TaskRow, meta: TaskMeta) -> tuple[bool, str]:
         """Intake security gate: decide whether the request is safe to work on at
         all, from the issue text + the author's trust level — before any clone.
         Returns (allowed, verdict_text)."""
@@ -171,7 +175,7 @@ class GithubSource:
         allowed = parse_verdict(text, "VERDICT", ("ALLOW", "REJECT"), default="REJECT") == "ALLOW"
         return allowed, text
 
-    async def _autofix(self, task: TaskRow, meta: dict) -> str | None:
+    async def _autofix(self, task: TaskRow, meta: TaskMeta) -> str | None:
         repo, issue, kind = meta["repo"], meta["issue"], meta["kind"]
         mode = meta.get("mode", "")
         log.info(f"autofix {kind} #{issue} in {repo}{' (rework)' if mode == 'rework' else ''}")
@@ -182,11 +186,12 @@ class GithubSource:
             if not allowed:
                 reason = verdict.split("\n", 1)[-1].strip() or verdict
                 await comment_issue(
-                    repo, issue,
+                    repo,
+                    issue,
                     f"{BOT_COMMENT_PREFIX}\n\nThis request was declined by the security intake policy: {reason}",
                 )
                 tasks.set_status(task.id, "rejected")
-                log.warn(f"#{issue}: intake gate REJECTED — {reason[:200]}")
+                log.warning(f"#{issue}: intake gate REJECTED — {reason[:200]}")
                 return f"Rejected by intake gate: {reason[:200]}"
 
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
@@ -201,10 +206,16 @@ class GithubSource:
         if guidance:
             log.info(f"#{issue}: loaded repo instructions ({len(guidance)} chars)")
 
-        state: dict = {
-            "repo": repo, "issue": issue, "kind": kind,
-            "title": task.prompt, "body": meta.get("body", ""), "url": meta.get("url", ""),
-            "base": base, "branch": branch, "repo_path": repo_path,
+        state: AutofixState = {
+            "repo": repo,
+            "issue": issue,
+            "kind": kind,
+            "title": task.prompt,
+            "body": meta.get("body", ""),
+            "url": meta.get("url", ""),
+            "base": base,
+            "branch": branch,
+            "repo_path": repo_path,
         }
         if mode == "rework":
             feedback = meta.get("feedback", "")
@@ -220,10 +231,7 @@ class GithubSource:
             graph = build_autofix_graph(self.llm, env, self.cfg, guidance, self.strong_llm)
             out = await graph.ainvoke(
                 state,
-                config={
-                    "recursion_limit": _GRAPH_RECURSION,
-                    **self._trace(task, meta, "rework" if mode == "rework" else "autofix"),
-                },
+                config=self._graph_config(task, meta, "rework" if mode == "rework" else "autofix"),
             )
 
         if out.get("pr_number"):
@@ -232,19 +240,29 @@ class GithubSource:
             tasks.set_meta(
                 task.id,
                 {
-                    **meta, "branch": branch,
-                    "prNumber": out["pr_number"], "prUrl": out.get("pr_url"),
-                    "prState": "open", "ciRerunCount": 0, "mode": "", "feedback": "",
+                    **meta,
+                    "branch": branch,
+                    "prNumber": out["pr_number"],
+                    "prUrl": out.get("pr_url"),
+                    "prState": "open",
+                    "ciRerunCount": 0,
+                    "mode": "",
+                    "feedback": "",
                 },
             )
             tasks.set_status(task.id, "awaiting_review")
         return out.get("result")
 
-    async def _pr_reply(self, task: TaskRow, meta: dict) -> str | None:
+    async def _pr_reply(self, task: TaskRow, meta: TaskMeta) -> str | None:
         """Handle a human comment on an open PR: classify it, then either answer
         (question) or rework the PR (change request). Set by the PR watcher via
         `mode = pr_reply` + `feedback = <comment>`."""
         repo, issue, pr = meta["repo"], meta["issue"], meta.get("prNumber")
+        if pr is None:
+            # Only the watcher sets mode=pr_reply, and it sets prNumber with it.
+            # Reaching here means the meta was rewritten wrongly — say so rather
+            # than posting a comment to PR "None".
+            raise RuntimeError(f"task #{task.id} is a pr_reply with no prNumber in meta")
         comment = meta.get("feedback", "")
         user = (
             f"PR #{pr} for issue #{issue} in {repo}\n\n"
@@ -257,9 +275,7 @@ class GithubSource:
         )
         text = resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
         # Unparseable → NONE: do nothing rather than rework a PR on a guess.
-        intent = parse_verdict(
-            text, "INTENT", ("QUESTION", "CHANGE_REQUEST", "NONE"), default="NONE"
-        )
+        intent = parse_verdict(text, "INTENT", ("QUESTION", "CHANGE_REQUEST", "NONE"), default="NONE")
         log.info(f"#{issue}: PR comment classified as {intent}")
 
         if intent == "CHANGE_REQUEST":
@@ -267,7 +283,7 @@ class GithubSource:
             return await self._autofix(task, {**meta, "mode": "rework"})
 
         if intent == "QUESTION":
-            answer = await self._answer_pr(task, meta)
+            answer = await self._answer_pr(task, meta, pr)
             await comment_pr(repo, pr, f"{BOT_COMMENT_PREFIX}\n\n{answer[:60000]}")
             result = f"Answered comment on PR #{pr}."
         else:
@@ -278,30 +294,31 @@ class GithubSource:
         tasks.set_status(task.id, "awaiting_review")
         return result
 
-    async def _answer_pr(self, task: TaskRow, meta: dict) -> str:
+    async def _answer_pr(self, task: TaskRow, meta: TaskMeta, pr_number: int) -> str:
         """Answer a question comment grounded in the PR branch code."""
         repo, issue = meta["repo"], meta["issue"]
         branch = meta.get("branch") or issue_branch(issue)
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         await checkout_existing_branch(repo_path, branch)
-        comments = await pr_comments(repo, meta.get("prNumber"))
+        comments = await pr_comments(repo, pr_number)
         thread = render_thread(comments)
         guidance = read_repo_guidance(repo_path)
         async with task_container(repo_path, self.cfg.container) as env:
             graph = build_answer_graph(self.llm, env, self.cfg, guidance, auto_post=False)
             out = await graph.ainvoke(
                 {
-                    "repo": repo, "issue": issue, "title": task.prompt,
-                    "body": meta.get("body", ""), "url": meta.get("prUrl", ""), "thread": thread,
+                    "repo": repo,
+                    "issue": issue,
+                    "title": task.prompt,
+                    "body": meta.get("body", ""),
+                    "url": meta.get("prUrl", ""),
+                    "thread": thread,
                 },
-                config={
-                    "recursion_limit": _GRAPH_RECURSION,
-                    **self._trace(task, meta, "answer_pr"),
-                },
+                config=self._graph_config(task, meta, "answer_pr"),
             )
         return out.get("answer") or "(no answer produced)"
 
-    async def _answer(self, task: TaskRow, meta: dict) -> str | None:
+    async def _answer(self, task: TaskRow, meta: TaskMeta) -> str | None:
         repo, issue = meta["repo"], meta["issue"]
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         comments = await list_issue_comments(repo, issue)
@@ -312,13 +329,14 @@ class GithubSource:
             graph = build_answer_graph(self.llm, env, self.cfg, guidance)
             out = await graph.ainvoke(
                 {
-                    "repo": repo, "issue": issue, "title": task.prompt,
-                    "body": meta.get("body", ""), "url": meta.get("url", ""), "thread": thread,
+                    "repo": repo,
+                    "issue": issue,
+                    "title": task.prompt,
+                    "body": meta.get("body", ""),
+                    "url": meta.get("url", ""),
+                    "thread": thread,
                 },
-                config={
-                    "recursion_limit": _GRAPH_RECURSION,
-                    **self._trace(task, meta, "answer_issue"),
-                },
+                config=self._graph_config(task, meta, "answer_issue"),
             )
 
         # Advance the conversation cursor to the newest human comment we answered.

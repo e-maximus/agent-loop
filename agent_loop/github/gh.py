@@ -2,6 +2,12 @@
 
 argv arrays only (no shell), so issue/prompt text can never be reinterpreted as
 shell when it flows into command arguments.
+
+Every git invocation here runs on the **host**, with credentials, against a
+checkout the agent has been writing to. So they all go through `_git()`, which
+disables hooks: `git commit` would otherwise execute `.git/hooks/pre-commit`
+from that checkout. tools.py refuses to write into `.git/`; this is the second
+lock on the same door, because a repo can also arrive with hooks already in it.
 """
 
 from __future__ import annotations
@@ -59,6 +65,16 @@ class PullRequest:
     existing: bool = False
 
 
+async def _git(args: list[str], *, cwd: str, throw_on_error: bool = True):
+    """git, with hooks from the target checkout disabled.
+
+    `core.hooksPath=/dev/null` is inherited by every hook lookup for this
+    invocation, so a `.git/hooks/pre-commit` left in the tree — by the agent, or
+    by whoever pushed to the repo — cannot run as us.
+    """
+    return await run("git", ["-c", "core.hooksPath=/dev/null", *args], cwd=cwd, throw_on_error=throw_on_error)
+
+
 def is_bot_comment(body: str) -> bool:
     return body.lstrip().startswith("🤖")
 
@@ -89,8 +105,18 @@ async def default_branch(repo: str) -> str:
 async def list_open_issues(repo: str) -> list[Issue]:
     res = await run(
         "gh",
-        ["issue", "list", "--repo", repo, "--state", "open",
-         "--json", "number,title,body,url,labels,author", "--limit", "100"],
+        [
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            "open",
+            "--json",
+            "number,title,body,url,labels,author",
+            "--limit",
+            "100",
+        ],
     )
     parsed = json.loads(res.stdout or "[]")
     return [
@@ -99,7 +125,7 @@ async def list_open_issues(repo: str) -> list[Issue]:
             title=i["title"],
             body=i.get("body") or "",
             url=i["url"],
-            labels=[l["name"] for l in (i.get("labels") or [])],
+            labels=[lbl["name"] for lbl in (i.get("labels") or [])],
             author=(i.get("author") or {}).get("login", ""),
         )
         for i in parsed
@@ -111,7 +137,8 @@ async def issue_author_association(repo: str, issue: int) -> str:
     `gh issue list --json` does not expose it, so fetch it per issue only when
     the triage gate actually needs it. Falls back to NONE (the strictest case)."""
     res = await run(
-        "gh", ["api", f"repos/{repo}/issues/{issue}", "--jq", ".author_association"],
+        "gh",
+        ["api", f"repos/{repo}/issues/{issue}", "--jq", ".author_association"],
         throw_on_error=False,
     )
     return (res.stdout.strip() or "NONE") if res.code == 0 else "NONE"
@@ -119,7 +146,8 @@ async def issue_author_association(repo: str, issue: int) -> str:
 
 async def list_issue_comments(repo: str, issue: int) -> list[IssueComment]:
     res = await run(
-        "gh", ["api", f"repos/{repo}/issues/{issue}/comments", "--paginate"],
+        "gh",
+        ["api", f"repos/{repo}/issues/{issue}/comments", "--paginate"],
         throw_on_error=False,
     )
     if res.code != 0:
@@ -146,36 +174,36 @@ async def ensure_clone(repo: str, clone_dir: str) -> str:
         log.info(f"cloning {repo} → {dest}")
         await run("gh", ["repo", "clone", repo, dest])
     await run("gh", ["auth", "setup-git"], throw_on_error=False)
-    await run("git", ["fetch", "origin", base], cwd=dest)
-    await run("git", ["checkout", base], cwd=dest)
-    await run("git", ["reset", "--hard", f"origin/{base}"], cwd=dest)
-    await run("git", ["clean", "-fd"], cwd=dest)
+    await _git(["fetch", "origin", base], cwd=dest)
+    await _git(["checkout", base], cwd=dest)
+    await _git(["reset", "--hard", f"origin/{base}"], cwd=dest)
+    await _git(["clean", "-fd"], cwd=dest)
     return dest
 
 
 async def prepare_branch(repo_path: str, branch: str) -> None:
-    await run("git", ["checkout", "-B", branch], cwd=repo_path)
+    await _git(["checkout", "-B", branch], cwd=repo_path)
 
 
 async def checkout_existing_branch(repo_path: str, branch: str) -> None:
     """Check out an existing PR branch from origin for rework, preserving its
     commits (unlike prepare_branch, which resets the branch onto base)."""
-    await run("git", ["fetch", "origin", branch], cwd=repo_path)
-    await run("git", ["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
+    await _git(["fetch", "origin", branch], cwd=repo_path)
+    await _git(["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
 
 
 async def has_changes(repo_path: str) -> bool:
-    res = await run("git", ["status", "--porcelain"], cwd=repo_path)
+    res = await _git(["status", "--porcelain"], cwd=repo_path)
     return len(res.stdout.strip()) > 0
 
 
 async def commit_all(repo_path: str, message: str) -> None:
-    await run("git", ["add", "-A"], cwd=repo_path)
-    await run("git", ["commit", "-m", message], cwd=repo_path)
+    await _git(["add", "-A"], cwd=repo_path)
+    await _git(["commit", "-m", message], cwd=repo_path)
 
 
 async def push(repo_path: str, branch: str) -> None:
-    await run("git", ["push", "-u", "origin", branch, "--force-with-lease"], cwd=repo_path)
+    await _git(["push", "-u", "origin", branch, "--force-with-lease"], cwd=repo_path)
 
 
 async def find_open_pr(repo: str, branch: str) -> PullRequest | None:
@@ -203,8 +231,10 @@ async def open_pr(
     repo_path: str, *, base: str, title: str, body: str, repo: str = "", head: str = ""
 ) -> PullRequest:
     res = await run(
-        "gh", ["pr", "create", "--base", base, "--title", title, "--body", body],
-        cwd=repo_path, throw_on_error=False,
+        "gh",
+        ["pr", "create", "--base", base, "--title", title, "--body", body],
+        cwd=repo_path,
+        throw_on_error=False,
     )
     if res.code == 0:
         url = res.stdout.strip().split("\n")[-1] if res.stdout.strip() else ""
@@ -241,7 +271,8 @@ ChecksState = str  # 'pending' | 'success' | 'failure' | 'none'
 async def pr_checks_state(repo: str, pr_number: int) -> ChecksState:
     """Roll up the PR's CI checks into a single state."""
     res = await run(
-        "gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
+        "gh",
+        ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
         throw_on_error=False,
     )
     if res.code != 0:
@@ -272,7 +303,8 @@ async def pr_failed_check_conclusions(repo: str, pr_number: int) -> list[str]:
     Lets the watcher tell a transient failure (cancelled/timed-out — worth one
     rerun) apart from a genuine build/test failure."""
     res = await run(
-        "gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
+        "gh",
+        ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
         throw_on_error=False,
     )
     if res.code != 0:
@@ -296,8 +328,19 @@ async def rerun_failed_runs(repo: str, branch: str) -> bool:
     """Re-run the failed jobs of the most recent workflow run on `branch`.
     Returns True if a rerun was triggered. Used at most once per PR."""
     res = await run(
-        "gh", ["run", "list", "--repo", repo, "--branch", branch, "--limit", "20",
-               "--json", "databaseId,conclusion,status,headSha"],
+        "gh",
+        [
+            "run",
+            "list",
+            "--repo",
+            repo,
+            "--branch",
+            branch,
+            "--limit",
+            "20",
+            "--json",
+            "databaseId,conclusion,status,headSha",
+        ],
         throw_on_error=False,
     )
     if res.code != 0:
@@ -312,7 +355,8 @@ async def rerun_failed_runs(repo: str, branch: str) -> bool:
         conclusion = (r.get("conclusion") or "").upper()
         if conclusion in ("FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"):
             rr = await run(
-                "gh", ["run", "rerun", str(r["databaseId"]), "--repo", repo, "--failed"],
+                "gh",
+                ["run", "rerun", str(r["databaseId"]), "--repo", repo, "--failed"],
                 throw_on_error=False,
             )
             triggered = triggered or rr.code == 0
@@ -335,16 +379,18 @@ async def pr_comments(repo: str, pr_number: int) -> list[IssueComment]:
             body = c.get("body") or ""
             if not body.strip():
                 continue
-            out.append(IssueComment(
-                author=(c.get("user") or {}).get("login", "unknown"),
-                body=body,
-                created_at=c.get(ts_field) or "",
-                # Inline review comments carry the file/line + hunk they anchor
-                # to; keep it so rework edits the exact spot, not a guess.
-                path=c.get("path", "") if inline else "",
-                line=(c.get("line") or c.get("original_line")) if inline else None,
-                diff_hunk=c.get("diff_hunk", "") if inline else "",
-            ))
+            out.append(
+                IssueComment(
+                    author=(c.get("user") or {}).get("login", "unknown"),
+                    body=body,
+                    created_at=c.get(ts_field) or "",
+                    # Inline review comments carry the file/line + hunk they anchor
+                    # to; keep it so rework edits the exact spot, not a guess.
+                    path=c.get("path", "") if inline else "",
+                    line=(c.get("line") or c.get("original_line")) if inline else None,
+                    diff_hunk=c.get("diff_hunk", "") if inline else "",
+                )
+            )
 
     await _collect(f"repos/{repo}/issues/{pr_number}/comments", "created_at")
     await _collect(f"repos/{repo}/pulls/{pr_number}/comments", "created_at", inline=True)
@@ -355,7 +401,8 @@ async def pr_comments(repo: str, pr_number: int) -> list[IssueComment]:
 
 async def comment_pr(repo: str, pr_number: int, body: str) -> None:
     await run(
-        "gh", ["pr", "comment", str(pr_number), "--repo", repo, "--body", body],
+        "gh",
+        ["pr", "comment", str(pr_number), "--repo", repo, "--body", body],
         throw_on_error=False,
     )
 
@@ -366,7 +413,8 @@ async def pr_review_decision(repo: str, pr_number: int) -> str:
     supersedes their earlier ones). 'changes_requested' wins over 'approved' so
     an outstanding block is never merged over."""
     res = await run(
-        "gh", ["api", f"repos/{repo}/pulls/{pr_number}/reviews", "--paginate"],
+        "gh",
+        ["api", f"repos/{repo}/pulls/{pr_number}/reviews", "--paginate"],
         throw_on_error=False,
     )
     if res.code != 0:
@@ -386,13 +434,14 @@ async def pr_review_decision(repo: str, pr_number: int) -> str:
 
 async def pr_labels(repo: str, pr_number: int) -> list[str]:
     res = await run(
-        "gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "labels"],
+        "gh",
+        ["pr", "view", str(pr_number), "--repo", repo, "--json", "labels"],
         throw_on_error=False,
     )
     if res.code != 0:
         return []
     data = json.loads(res.stdout or "{}")
-    return [l["name"] for l in (data.get("labels") or [])]
+    return [lbl["name"] for lbl in (data.get("labels") or [])]
 
 
 async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
@@ -405,13 +454,12 @@ async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
 
 
 async def merge_pr(repo: str, pr_number: int) -> None:
-    await run(
-        "gh", ["pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch"]
-    )
+    await run("gh", ["pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch"])
 
 
 async def comment_issue(repo: str, issue: int, body: str) -> None:
     await run(
-        "gh", ["issue", "comment", str(issue), "--repo", repo, "--body", body],
+        "gh",
+        ["issue", "comment", str(issue), "--repo", repo, "--body", body],
         throw_on_error=False,
     )

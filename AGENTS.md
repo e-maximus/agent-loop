@@ -1,6 +1,11 @@
 # Working in this repo
 
-Guidance for agents making code changes here. Read this before you start.
+Guidance for agents making code changes here. Read this before you start, then
+read **[CODE_STANDARDS.md](CODE_STANDARDS.md)** — this file says what the project
+is and how to work in it; that one says what the code must look like (no
+import-time side effects, how untrusted input is gated, typed cross-module
+state, migrations, dependency pinning, and the four checks that must be green).
+Both are binding.
 
 ## What this is
 
@@ -74,18 +79,27 @@ prompts, and anything the agent posts to GitHub.
    shell with a stub returning canned exit codes. What is worth covering is the
    decision (which node runs next, whether a PR is adopted, whether a command was
    skipped), not the plumbing around it.
-2. **Run what CI runs** ([.github/workflows/ci.yml](.github/workflows/ci.yml)):
+2. **Run what CI runs** ([.github/workflows/ci.yml](.github/workflows/ci.yml)) —
+   all four, and `pyright` must be at zero, not merely lower:
    ```bash
+   .venv/bin/python -m ruff check .
+   .venv/bin/python -m ruff format --check .
+   .venv/bin/pyright
    .venv/bin/python -m pytest -q
    ```
    In Claude Code the `checklist` agent runs this plus the config and hygiene
    checks, and reports a compact summary.
 3. **If the diff touches the boundaries** — `tools.py`, `exec.py`,
    `container.py`, or anything that builds a prompt from issue/PR text — re-read
-   the *Boundaries* and *Trust* notes above. In Claude Code the
+   the *Boundaries* and *Trust* notes above plus [SECURITY.md](SECURITY.md), and
+   extend [tests/test_path_gate.py](tests/test_path_gate.py) or
+   [tests/test_agent_env.py](tests/test_agent_env.py): passing the existing cases
+   is not evidence about the path you added. In Claude Code the
    `sandbox-boundary` agent audits a diff for exactly this.
 4. **If you added or renamed a config field**, update
    `agent-loop.config.example.yaml` and `.env.example` in the same PR.
+5. **If you changed a dependency**, regenerate `constraints.txt` in the same PR —
+   that file, not `pyproject.toml`, is what the machine installs.
 
 ## Branching & PRs
 

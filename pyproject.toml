@@ -4,22 +4,30 @@ version = "0.4.0"
 description = "Autonomous coding-agent runner: GitHub issue auto-fix, run locally in Docker. Python + LangGraph."
 requires-python = ">=3.12"
 license = { text = "MIT" }
+# Upper bounds are deliberate. The release watcher reinstalls unattended, so
+# without them the version in this file does not determine what ships: a major
+# release of LangChain lands on the machine on its own schedule, goes red, and
+# rolls back. Widen a bound in the PR that has actually run against the new
+# major. `constraints.txt` pins the exact set the deployed machine runs.
 dependencies = [
     # LangChain 1.x: the agent loop is langchain.agents.create_agent; langgraph
     # stays a direct dependency for the outer StateGraph pipelines.
-    "langgraph>=1.0",
-    "langchain>=1.0",
-    "langchain-deepseek>=0.1.0",
-    "pydantic>=2.9",
-    "pydantic-settings>=2.6",
-    "pyyaml>=6.0",
-    "python-dotenv>=1.0",
+    "langgraph>=1.0,<2",
+    "langchain>=1.0,<2",
+    "langchain-deepseek>=1.0,<2",
+    "pydantic>=2.9,<3",
+    "pydantic-settings>=2.6,<3",
+    "pyyaml>=6.0,<7",
+    "python-dotenv>=1.0,<2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.24",
+    "pytest>=8.0,<10",
+    "pytest-asyncio>=0.24,<2",
+    "pytest-cov>=5.0,<8",
+    "ruff>=0.16,<0.17",
+    "pyright>=1.1.400,<2",
 ]
 
 [project.scripts]
@@ -28,6 +36,19 @@ agent-loop = "agent_loop.main:run"
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.coverage.run]
+source = ["agent_loop"]
+branch = true
+
+[tool.coverage.report]
+# Set just under where the suite actually sits (58.8%), so it catches a module
+# going untested — as tools.py was — rather than decorating the README. Raise it
+# when the number has moved, not before.
+fail_under = 55
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]
 
 [build-system]
 requires = ["hatchling"]
@@ -39,3 +60,45 @@ packages = ["agent_loop"]
 [tool.pyright]
 pythonVersion = "3.12"
 typeCheckingMode = "basic"
+include = ["agent_loop"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E", "W",    # pycodestyle
+    "F",         # pyflakes
+    "I",         # import sorting
+    "UP",        # pyupgrade
+    "B",         # bugbear
+    "S",         # bandit — this process runs untrusted work
+    "BLE",       # blind except
+    "G",         # logging format
+    "DTZ",       # naive datetimes
+    "PL",        # pylint subset
+    "RUF",
+]
+ignore = [
+    "E501",     # line length is the formatter's business, not the linter's
+    "PLR0912",  # branch count: the graph nodes and gh parsers are flat on purpose
+    "PLR0913",  # argument count: builder functions take what the pipeline needs
+    "PLR0915",  # statement count: the graph builders are one function by design
+    "PLR2004",  # magic values read fine in the parsing code here
+    "S603",     # every subprocess call is an argv array by design (see exec.py)
+    "S607",     # `git`/`gh`/`docker` are resolved from PATH deliberately
+    # G/PLE1205 describe stdlib logging call signatures. agent_loop.logging.Logger
+    # takes (msg, extra) and formats eagerly in the wrapper, so %-style lazy
+    # formatting does not apply and these fire on correct code.
+    "G003",
+    "G004",
+    "PLE1205",
+    "RUF001",   # ✓ ─ × in comments and log lines are intentional, not typos
+]
+
+[tool.ruff.lint.per-file-ignores]
+# Tests assert on internals and fake subprocesses; the security lints there
+# describe the fixtures, not the runner.
+"tests/**" = ["S101", "S105", "S106", "S108", "BLE001", "PLR2004"]
+"scripts/**" = ["S101"]

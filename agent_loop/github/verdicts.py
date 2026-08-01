@@ -44,9 +44,7 @@ def _resolve(token: str, options: Sequence[str]) -> str | None:
     return prefixed[0] if len(prefixed) == 1 else None
 
 
-def parse_verdict(
-    text: str, label: str, options: Sequence[str], *, default: str
-) -> str:
+def parse_verdict(text: str, label: str, options: Sequence[str], *, default: str) -> str:
     """Extract one of `options` from a labelled verdict in `text`.
 
     Tried in order: the label on the first non-empty line, a bare option token on

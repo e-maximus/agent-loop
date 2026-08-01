@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import pytest
 
 from agent_loop.config import GithubSourceConfig
+from agent_loop.db import tasks
 from agent_loop.github import gh
 from agent_loop.github import poller as poller_mod
 from agent_loop.github.autofix_graph import (
@@ -19,7 +20,6 @@ from agent_loop.github.autofix_graph import (
     condense,
 )
 from agent_loop.github.poller import GithubPoller
-from agent_loop.db import tasks
 from tests.conftest import make_async
 
 
@@ -27,7 +27,9 @@ from tests.conftest import make_async
 def test_baseline_verify_is_on_by_default_and_configurable():
     # The YAML key is the contract; the field name is not.
     assert GithubSourceConfig(type="github", id="t", repo="o/r").baseline_verify is True
-    assert GithubSourceConfig(type="github", id="t", repo="o/r", baselineVerify=False).baseline_verify is False
+    assert (
+        GithubSourceConfig(type="github", id="t", repo="o/r", baselineVerify=False).baseline_verify is False
+    )
 
 
 def test_condense_keeps_the_error_a_repeated_warning_would_evict():
@@ -102,7 +104,9 @@ def result(code=0, stdout="", stderr=""):
 
 
 PR_URL = "https://github.com/o/r/pull/85"
-EXISTS = result(code=1, stderr=f'a pull request for branch "issue-84" into branch "main" already exists:\n{PR_URL}')
+EXISTS = result(
+    code=1, stderr=f'a pull request for branch "issue-84" into branch "main" already exists:\n{PR_URL}'
+)
 PR_LIST = result(stdout=json.dumps([{"number": 85, "url": PR_URL}]))
 
 

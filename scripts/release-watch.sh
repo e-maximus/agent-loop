@@ -115,7 +115,10 @@ agent_is_up() {
 
 git reset --hard --quiet "origin/main"
 
-if ! "$VENV/bin/pip" install -e ".[dev]" --quiet >>"$LOG" 2>&1; then
+# -c constraints.txt: install the exact dependency set this release was tested
+# against. Without it the reinstall resolves whatever PyPI serves today, and a
+# transitive release becomes an unattended deploy nobody made.
+if ! "$VENV/bin/pip" install -e ".[dev]" -c constraints.txt --quiet >>"$LOG" 2>&1; then
     notify "pip install failed for $remote_version"
     roll_back
     exit 1

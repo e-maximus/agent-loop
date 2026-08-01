@@ -11,7 +11,9 @@ import subprocess
 from importlib.metadata import PackageNotFoundError
 from importlib.metadata import version as _pkg_version
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
+
+from langchain_core.runnables import RunnableConfig
 
 _ROOT = Path(__file__).resolve().parent.parent
 
@@ -37,9 +39,12 @@ def _read_commit() -> str:
         pass
 
     try:
-        res = subprocess.run(
+        res = subprocess.run(  # noqa: PLW1510 — returncode is checked below
             ["git", "rev-parse", "--short=12", "HEAD"],
-            cwd=_ROOT, capture_output=True, text=True, timeout=5,
+            cwd=_ROOT,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
         if res.returncode == 0 and res.stdout.strip():
             return res.stdout.strip()
@@ -54,7 +59,7 @@ AGENT_COMMIT = _read_commit()
 BUILD = f"{AGENT_VERSION}+{AGENT_COMMIT}"
 
 
-def trace_config(**extra: Any) -> dict[str, Any]:
+def trace_config(**extra: Any) -> RunnableConfig:
     """Run config for a traced LLM/graph call: build identity plus whatever task
     context the caller has (source id, issue, task id, kind).
 
@@ -64,4 +69,4 @@ def trace_config(**extra: Any) -> dict[str, Any]:
     """
     metadata: dict[str, Any] = {"version": AGENT_VERSION, "commit": AGENT_COMMIT}
     metadata.update({k: v for k, v in extra.items() if v not in (None, "")})
-    return {"metadata": metadata, "tags": [f"agent-loop@{AGENT_VERSION}"]}
+    return cast("RunnableConfig", {"metadata": metadata, "tags": [f"agent-loop@{AGENT_VERSION}"]})

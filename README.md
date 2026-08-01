@@ -157,13 +157,19 @@ the CI roll-up, the task lifecycle/dedup queries, the queue guard, and the
 intake gate.
 
 ```bash
-.venv/bin/pip install -e ".[dev]"   # pytest + pytest-asyncio
+.venv/bin/pip install -e ".[dev]"   # pytest, ruff, pyright
 .venv/bin/python -m pytest
 ```
 
+`constraints.txt` pins the exact dependency set the deployed machine runs; add
+`-c constraints.txt` to the install to reproduce it exactly. CI runs four checks —
+`ruff check`, `ruff format --check`, `pyright`, `pytest`.
+
 Changing this repo? [AGENTS.md](AGENTS.md) is the working guide — project shape,
 the two boundaries that keep an unattended runner safe, and why a merge does not
-deploy but a version bump does. [CONTRIBUTORS.md](CONTRIBUTORS.md) covers PRs.
+deploy but a version bump does. [CODE_STANDARDS.md](CODE_STANDARDS.md) is what
+the code itself has to look like, and [SECURITY.md](SECURITY.md) states the trust
+model. [CONTRIBUTORS.md](CONTRIBUTORS.md) covers PRs.
 
 ## The model
 

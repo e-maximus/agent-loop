@@ -43,7 +43,7 @@ async def test_triage_allows_legit_request(monkeypatch):
     src = make_source("VERDICT: ALLOW\nlooks like normal work")
     monkeypatch.setattr(source_mod, "issue_author_association", make_async("OWNER"))
     task = make_task()
-    allowed, text = await src._triage(task, {"repo": "o/r", "issue": 1})
+    allowed, _ = await src._triage(task, {"repo": "o/r", "issue": 1})
     assert allowed is True
 
     # The gate runs outside any graph, so it is its own trace root — it has to
