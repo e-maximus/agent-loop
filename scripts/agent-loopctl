@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+# Control the local agent-loop service.
+#
+#   agent-loopctl start|stop|restart|status|logs|watch-logs|deploy|version
+#
+# Operates on the prod checkout ($AGENT_LOOP_HOME, default ~/agent-loop-prod),
+# not on your dev clone.
+set -euo pipefail
+
+ROOT="${AGENT_LOOP_HOME:-$HOME/agent-loop-prod}"
+LABEL="com.agent-loop"
+WATCH_LABEL="com.agent-loop.release-watch"
+DOMAIN="gui/$(id -u)"
+PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+WATCH_PLIST="$HOME/Library/LaunchAgents/$WATCH_LABEL.plist"
+
+usage() { sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+
+case "${1:-}" in
+start)
+    launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || launchctl kickstart "$DOMAIN/$LABEL"
+    launchctl bootstrap "$DOMAIN" "$WATCH_PLIST" 2>/dev/null || true
+    echo "✓ started"
+    ;;
+stop)
+    # Stops the watcher too, otherwise it would restart the agent on the next release.
+    launchctl bootout "$DOMAIN/$WATCH_LABEL" 2>/dev/null || true
+    launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+    echo "✓ stopped"
+    ;;
+restart)
+    launchctl kickstart -k "$DOMAIN/$LABEL"
+    echo "✓ restarted"
+    ;;
+status)
+    running="$(/usr/bin/sqlite3 "$ROOT/data/agent-loop.db" \
+        "SELECT COUNT(*) FROM tasks WHERE status='running'" 2>/dev/null || echo '?')"
+    echo "checkout : $ROOT"
+    echo "version  : $(cat "$ROOT/data/deployed.version" 2>/dev/null || echo 'never deployed') \
+($(cat "$ROOT/data/deployed.sha" 2>/dev/null | cut -c1-12 || echo '-'))"
+    echo "agent    : $(launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk -F' = ' '/state = /{print $2; exit}' || echo 'not loaded')"
+    echo "watcher  : $(launchctl print "$DOMAIN/$WATCH_LABEL" >/dev/null 2>&1 && echo loaded || echo 'not loaded')"
+    echo "running tasks: $running"
+    ;;
+logs)
+    tail -n "${2:-80}" "$ROOT/data/logs/agent-loop.log"
+    ;;
+watch-logs)
+    tail -f "$ROOT/data/logs/agent-loop.log" "$ROOT/data/logs/daemon.err.log"
+    ;;
+deploy)
+    # Force a deploy check now instead of waiting for the 5-minute tick.
+    AGENT_LOOP_HOME="$ROOT" bash "$ROOT/scripts/release-watch.sh"
+    tail -n 20 "$ROOT/data/logs/release-watch.log"
+    ;;
+version)
+    "$ROOT/.venv/bin/python" -c 'from agent_loop.version import BUILD; print(BUILD)'
+    ;;
+*)
+    usage
+    ;;
+esac

@@ -43,8 +43,8 @@ intake gate ─▶ investigate ─▶ plan ─▶ implement ─┬─(no changes
   (`authorAssociation`). A malicious/unsafe ask (inject a script, exfiltrate
   secrets, weaken auth…) is **declined** and never worked on. External authors
   are judged more strictly.
-- **investigate / implement / write_tests** — ReAct agents (`create_react_agent`)
-  with the Read/Write/Edit/Bash/Grep/Glob tools.
+- **investigate / implement / write_tests** — tool-calling agents
+  (`langchain.agents.create_agent`) with the Read/Write/Edit/Bash/Grep/Glob tools.
 - **plan / critic / summarize** — single, focused LLM calls.
 - **verify** — runs the configured commands (lint + build + e2e); a red result
   loops back to `implement` with the failure log (bounded to 3 cycles, then it
@@ -147,9 +147,61 @@ DeepSeek via LangChain `init_chat_model` ([llm.py](agent_loop/llm.py)). The API 
 only the "brain" — the tool-use loop is LangGraph's and the tool executor is ours
 ([tools.py](agent_loop/tools.py)), so a different provider is a one-line change.
 
-## Keeping it alive
+## Running as a service
 
-The process runs as long as the machine is on. Wrap it in `pm2`/launchd to
-survive sleep/crashes; tasks interrupted mid-run are re-queued on boot (an
-interruption is not a failure), while `awaiting_review` PRs are picked back up by
-the watcher.
+Deployment target is this machine — no cloud. Two `launchd` agents: the runner
+itself, and a watcher that keeps it on the latest release.
+
+```bash
+scripts/install-service.sh            # → ~/agent-loop-prod, both LaunchAgents
+scripts/agent-loopctl status          # version, state, running tasks
+scripts/agent-loopctl logs | watch-logs | restart | deploy
+```
+
+The **prod checkout is separate from your dev clone** (`~/agent-loop-prod`): the
+watcher runs `git reset --hard` in it. `.env` and `agent-loop.config.yaml` are
+gitignored, so they survive every deploy.
+
+Two environment facts the plists exist to handle: `launchd` gives a process no
+shell profile, so `PATH` is set explicitly (`gh` from Homebrew, `docker`,
+`node`/`npm`) — without it the source disables itself or every verify goes red;
+and all of `.env`, the SQLite DB and the log dir resolve relative to the working
+directory, so `WorkingDirectory` is mandatory. These are *LaunchAgents*, not
+daemons: they run in your logged-in session, where `gh`'s keychain token is
+reachable.
+
+Sleep pauses everything (`sudo pmset -c sleep 0` to prevent it). Interrupted
+tasks are re-queued on boot — an interruption is not a failure — and
+`awaiting_review` PRs are picked back up by the PR watcher.
+
+## Releases
+
+`main` is protected: no direct pushes, every change goes through a PR with green
+CI (`scripts/install-hooks.sh` installs a pre-push hook that says so before the
+round-trip). Because `main` also carries ordinary work, **a release is a version
+bump** — [release-watch.sh](scripts/release-watch.sh) deploys when `version` in
+`pyproject.toml` differs from what is deployed, not on every commit.
+
+Pull-based by design: the machine is behind NAT and the repo is public, so a
+self-hosted Actions runner would be both unreachable and a way for any PR author
+to run code here. Every 5 minutes the watcher:
+
+1. fetches `main`; exits unless the version changed;
+2. waits (≤15 min) for the agent to go **idle** — `queue.stop()` cancels the
+   in-flight task rather than draining it, and re-running it from scratch wastes
+   its LLM spend;
+3. resets to `main`, reinstalls, runs `pytest`;
+4. restarts and checks the process is still up 30 s later.
+
+Anything red rolls back to the previous commit and notifies. The deployed
+commit is recorded in `data/deployed.sha`, which is also what stamps traces.
+
+## Tracing
+
+With `LANGSMITH_*` set (see [.env.example](.env.example)), every run is tagged
+with the build that produced it — `version`, `commit`, plus `source_id`, `repo`,
+`issue`, `task_id`, `stage` ([version.py](agent_loop/version.py)). Metadata is
+inherited by child runs, so tagging the graph invocation covers every node, tool
+call and LLM call inside it; the calls that happen *outside* a graph (the intake
+gate, PR-comment classification) carry it themselves. In LangSmith this makes a
+trace findable by issue, and success rates comparable across releases.

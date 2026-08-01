@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Any
 
 from langchain_core.language_models import BaseChatModel
 
@@ -21,6 +22,7 @@ from ..container import task_container
 from ..db import TaskRow, tasks
 from ..logging import create_logger, task_log_scope
 from ..queue import Queue
+from ..version import trace_config
 from .answer_graph import build_answer_graph, render_thread
 from .autofix_graph import build_autofix_graph
 from . import prompts
@@ -40,6 +42,7 @@ from .gh import (
 )
 from .merge_watcher import PrWatcher
 from .poller import GithubPoller
+from .verdicts import parse_verdict
 
 log = create_logger("github")
 
@@ -124,6 +127,19 @@ class GithubSource:
         await comment_issue(repo, issue, body)
         log.warn(f"#{issue}: signalled failure on the issue thread")
 
+    def _trace(self, task: TaskRow, meta: dict, stage: str) -> dict[str, Any]:
+        """LangSmith config for a call that starts a trace: build identity plus
+        the task it belongs to, so a run is findable by issue rather than by
+        timestamp. Children of a graph run inherit it."""
+        return trace_config(
+            stage=stage,
+            source_id=self.id,
+            repo=meta.get("repo"),
+            issue=meta.get("issue"),
+            task_id=task.id,
+            kind=meta.get("kind"),
+        )
+
     async def _triage(self, task: TaskRow, meta: dict) -> tuple[bool, str]:
         """Intake security gate: decide whether the request is safe to work on at
         all, from the issue text + the author's trust level — before any clone.
@@ -135,9 +151,14 @@ class GithubSource:
             f"Issue #{issue} in {repo}\nAuthor: {author} (authorAssociation: {assoc})\n\n"
             f"Title: {task.prompt}\n\n{meta.get('body') or '(no body)'}"
         )
-        resp = await self.llm.ainvoke([("system", prompts.triage_prompt(assoc)), ("user", user)])
+        resp = await self.llm.ainvoke(
+            [("system", prompts.triage_prompt(assoc)), ("user", user)],
+            config=self._trace(task, meta, "triage"),
+        )
         text = resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
-        allowed = "REJECT" not in text.split("\n", 1)[0].upper()
+        # Unparseable → REJECT. This gate decides whether to run untrusted work at
+        # all, so a verdict we cannot read must not count as permission.
+        allowed = parse_verdict(text, "VERDICT", ("ALLOW", "REJECT"), default="REJECT") == "ALLOW"
         return allowed, text
 
     async def _autofix(self, task: TaskRow, meta: dict) -> str | None:
@@ -187,7 +208,13 @@ class GithubSource:
 
         async with task_container(repo_path, self.cfg.container) as env:
             graph = build_autofix_graph(self.llm, env, self.cfg, guidance)
-            out = await graph.ainvoke(state, config={"recursion_limit": _GRAPH_RECURSION})
+            out = await graph.ainvoke(
+                state,
+                config={
+                    "recursion_limit": _GRAPH_RECURSION,
+                    **self._trace(task, meta, "rework" if mode == "rework" else "autofix"),
+                },
+            )
 
         if out.get("pr_number"):
             # Park the task in awaiting_review with a fresh CI-rerun budget; the
@@ -215,11 +242,14 @@ class GithubSource:
             f"--- the human's comment ---\n{comment}"
         )
         resp = await self.llm.ainvoke(
-            [("system", prompts.classify_comment_prompt()), ("user", user)]
+            [("system", prompts.classify_comment_prompt()), ("user", user)],
+            config=self._trace(task, meta, "classify_comment"),
         )
         text = resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
-        first = text.split("\n", 1)[0].upper()
-        intent = "CHANGE_REQUEST" if "CHANGE" in first else "QUESTION" if "QUESTION" in first else "NONE"
+        # Unparseable → NONE: do nothing rather than rework a PR on a guess.
+        intent = parse_verdict(
+            text, "INTENT", ("QUESTION", "CHANGE_REQUEST", "NONE"), default="NONE"
+        )
         log.info(f"#{issue}: PR comment classified as {intent}")
 
         if intent == "CHANGE_REQUEST":
@@ -254,7 +284,10 @@ class GithubSource:
                     "repo": repo, "issue": issue, "title": task.prompt,
                     "body": meta.get("body", ""), "url": meta.get("prUrl", ""), "thread": thread,
                 },
-                config={"recursion_limit": _GRAPH_RECURSION},
+                config={
+                    "recursion_limit": _GRAPH_RECURSION,
+                    **self._trace(task, meta, "answer_pr"),
+                },
             )
         return out.get("answer") or "(no answer produced)"
 
@@ -272,7 +305,10 @@ class GithubSource:
                     "repo": repo, "issue": issue, "title": task.prompt,
                     "body": meta.get("body", ""), "url": meta.get("url", ""), "thread": thread,
                 },
-                config={"recursion_limit": _GRAPH_RECURSION},
+                config={
+                    "recursion_limit": _GRAPH_RECURSION,
+                    **self._trace(task, meta, "answer_issue"),
+                },
             )
 
         # Advance the conversation cursor to the newest human comment we answered.

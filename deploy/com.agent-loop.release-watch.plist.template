@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.agent-loop.release-watch</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>@ROOT@/scripts/release-watch.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>@ROOT@</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:@HOME@/.local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>AGENT_LOOP_HOME</key>
+        <string>@ROOT@</string>
+    </dict>
+
+    <!-- Every 5 minutes. A missed interval (machine asleep) fires once on wake. -->
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>@ROOT@/data/logs/release-watch.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>@ROOT@/data/logs/release-watch.out.log</string>
+</dict>
+</plist>

@@ -1,12 +1,14 @@
 [project]
 name = "agent-loop"
-version = "0.2.0"
+version = "0.3.0"
 description = "Autonomous coding-agent runner: GitHub issue auto-fix, run locally in Docker. Python + LangGraph."
 requires-python = ">=3.12"
 license = { text = "MIT" }
 dependencies = [
-    "langgraph>=0.2.60",
-    "langchain>=0.3.0",
+    # LangChain 1.x: the agent loop is langchain.agents.create_agent; langgraph
+    # stays a direct dependency for the outer StateGraph pipelines.
+    "langgraph>=1.0",
+    "langchain>=1.0",
     "langchain-deepseek>=0.1.0",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",

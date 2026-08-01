@@ -15,8 +15,10 @@ from tests.conftest import make_async
 class FakeLLM:
     def __init__(self, content):
         self._content = content
+        self.configs = []
 
-    async def ainvoke(self, messages):
+    async def ainvoke(self, messages, config=None):
+        self.configs.append(config)
         return SimpleNamespace(content=self._content)
 
 
@@ -40,8 +42,16 @@ def make_task(**meta):
 async def test_triage_allows_legit_request(monkeypatch):
     src = make_source("VERDICT: ALLOW\nlooks like normal work")
     monkeypatch.setattr(source_mod, "issue_author_association", make_async("OWNER"))
-    allowed, text = await src._triage(make_task(), {"repo": "o/r", "issue": 1})
+    task = make_task()
+    allowed, text = await src._triage(task, {"repo": "o/r", "issue": 1})
     assert allowed is True
+
+    # The gate runs outside any graph, so it is its own trace root — it has to
+    # carry the build identity itself or those runs land in LangSmith unlabelled.
+    meta = src.llm.configs[0]["metadata"]
+    assert meta["stage"] == "triage"
+    assert meta["issue"] == 1 and meta["task_id"] == task.id
+    assert meta["version"] and meta["commit"]
 
 
 async def test_triage_rejects_malicious_request(monkeypatch):
