@@ -1,8 +1,8 @@
 """The chat model powering the agent — DeepSeek via LangChain init_chat_model.
 
 Single provider for now; init_chat_model keeps it trivial to add others later.
-The model only provides the "brain": the tool-use loop is LangGraph's
-create_react_agent and the tool executor is ours (tools.py).
+The model only provides the "brain": the tool-use loop is LangChain's
+create_agent and the tool executor is ours (tools.py).
 """
 
 from __future__ import annotations

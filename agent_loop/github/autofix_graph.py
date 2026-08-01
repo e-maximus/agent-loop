@@ -17,7 +17,7 @@ in the source runner, not here. In `rework` mode the graph re-enters at
 `implement` to amend an existing PR. Publish (git/gh) also runs on the host but
 is modelled as the terminal node.
 
-The agent-heavy nodes (investigate/implement/write_tests) use create_react_agent
+The agent-heavy nodes (investigate/implement/write_tests) use create_agent
 with the tools from tools.py; plan/critic/summarize are single LLM calls; verify
 is deterministic (runs the configured commands, exit code decides).
 """
@@ -26,19 +26,23 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypedDict
 
+from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
-from langgraph.prebuilt import create_react_agent
 
 from ..config import GithubSourceConfig, settings
 from ..container import ExecEnv
 from ..logging import create_logger
 from ..tools import build_tools, describe_tool
 from . import gh, prompts
+from .verdicts import parse_verdict
 
 log = create_logger("autofix")
 
 MAX_FIX_CYCLES = 3
+# How much of a failing command's output to put in the task log (the full log
+# still goes to the model).
+VERIFY_LOG_TAIL = 2000
 # react recursion limit derived from the turn budget (each turn ≈ model + tools).
 _RECURSION = settings.agent_max_turns * 2 + 1
 
@@ -94,7 +98,7 @@ def build_autofix_graph(
 
     async def _run_agent(system: str, user: str, *, include_write: bool) -> str:
         tools = build_tools(env, include_write=include_write)
-        agent = create_react_agent(llm, tools, prompt=system + guidance_suffix)
+        agent = create_agent(llm, tools, system_prompt=system + guidance_suffix)
         # Stream so every tool call is logged the moment it happens. If the run
         # crashes mid-flight (e.g. it hits the recursion limit), the trace up to
         # that point survives — otherwise we'd log nothing and never know whether
@@ -169,7 +173,15 @@ def build_autofix_graph(
             logs.append(f"$ {cmd}\nexit {res.code}\n{(res.stdout + res.stderr)[-4000:]}")
             if res.code != 0:
                 ok = False
+                # The failure is fed back to the model, but without it in the task
+                # log a red cycle is indistinguishable from any other — you cannot
+                # tell a broken diff from a broken environment without re-running
+                # the commands by hand.
+                tail = (res.stdout + res.stderr).strip()[-VERIFY_LOG_TAIL:]
+                log.warn(f"#{s['issue']} verify FAILED: `{cmd}` exit {res.code}\n{tail}")
                 break  # stop at first failure; feed it back
+        if ok:
+            log.info(f"#{s['issue']} verify: all {len(cfg.verify_commands)} commands green")
         return {"build_ok": ok, "build_log": "" if ok else "\n\n".join(logs)}
 
     async def critic(s: AutofixState) -> dict[str, Any]:
@@ -179,7 +191,8 @@ def build_autofix_graph(
             f"{_issue_context(s)}\n\n--- plan ---\n{s['plan']}\n\n--- diff ---\n{diff.stdout[:12000]}"
         )
         verdict = await _ask(prompts.critic_prompt(), user)
-        approved = "APPROVE" in verdict.split("\n", 1)[0].upper()
+        # Unparseable → REVISE: an unreadable review must not wave the diff through.
+        approved = parse_verdict(verdict, "VERDICT", ("APPROVE", "REVISE"), default="REVISE") == "APPROVE"
         return {"critic_feedback": "" if approved else verdict, "build_ok": s["build_ok"]}
 
     async def security(s: AutofixState) -> dict[str, Any]:
@@ -196,7 +209,9 @@ def build_autofix_graph(
         diff = await env.shell("git diff HEAD")
         user = f"{_issue_context(s)}\n\n--- plan ---\n{s['plan']}\n\n--- diff ---\n{diff.stdout[:12000]}"
         verdict = await _ask(prompts.security_prompt(), user)
-        review_ok = "PASS" in verdict.split("\n", 1)[0].upper()
+        # Unparseable → FAIL. Note PASS/FAIL specifically: the reviewer's own
+        # vocabulary (password, bypass) contains "PASS" as a substring.
+        review_ok = parse_verdict(verdict, "VERDICT", ("PASS", "FAIL"), default="FAIL") == "PASS"
         ok = scan_ok and review_ok
         feedback = ""
         if not ok:
@@ -209,11 +224,26 @@ def build_autofix_graph(
         log.info(f"#{s['issue']} summarize")
         diff = await env.shell("git diff HEAD")
         user = f"{_issue_context(s)}\n\n--- diff ---\n{diff.stdout[:12000]}"
+        # Without the verify outcome the summary describes whatever the agent ran
+        # itself inside `implement`, which is how a PR ends up claiming green
+        # tests after three red cycles.
+        if s.get("build_ok"):
+            user += f"\n\n--- verification (authoritative) ---\nAll checks passed: {', '.join(cfg.verify_commands)}"
+        else:
+            user += (
+                "\n\n--- verification (authoritative) ---\nChecks are STILL FAILING. "
+                "Do not claim they pass; state plainly what is red.\n"
+                f"{s.get('build_log', '')[-4000:]}"
+            )
         return {"pr_summary": await _ask(prompts.summarize_prompt(), user)}
 
     async def publish(s: AutofixState) -> dict[str, Any]:
         repo, issue, kind = s["repo"], s["issue"], s["kind"]
         summary = s.get("pr_summary") or s.get("diff_text", "")
+        # publish runs on the host and never sees the repo's AGENTS.md, so the
+        # attribution rule has to come from config rather than guidance.
+        trailer = "\n\n🤖 agent-loop" if cfg.git_attribution else ""
+        byline = " by agent-loop" if cfg.git_attribution else ""
         human = "\n\n> ⚠️ CI/tests or security review were still failing locally — please review carefully." if s.get("needs_human") else ""
 
         # ── rework: an existing PR is being amended, not a new one opened ──
@@ -226,7 +256,7 @@ def build_autofix_graph(
                     f"{gh.BOT_COMMENT_PREFIX}\n\nI looked at the feedback but did not find a change to make.\n\n{s.get('diff_text', '')[:2000]}",
                 )
                 return {"result": "Rework: no changes.", "pr_number": pr_number, "pr_url": pr_url}
-            await gh.commit_all(repo_path, f"fix: address review feedback on #{issue}\n\n🤖 agent-loop")
+            await gh.commit_all(repo_path, f"fix: address review feedback on #{issue}{trailer}")
             await gh.push(repo_path, s["branch"])
             await gh.comment_pr(
                 repo, pr_number,
@@ -245,10 +275,10 @@ def build_autofix_graph(
 
         prefix = "feat" if kind == "feature" else "fix"
         title = f"{prefix}: {s['title']}"[:100]
-        await gh.commit_all(repo_path, f"{title}\n\nCloses #{issue}\n\n🤖 agent-loop")
+        await gh.commit_all(repo_path, f"{title}\n\nCloses #{issue}{trailer}")
         await gh.push(repo_path, s["branch"])
 
-        body = f"Automated {'feature' if kind == 'feature' else 'fix'} for issue #{issue} by agent-loop.\n\nCloses #{issue}\n\n---\n{summary[:3000]}{human}"
+        body = f"Automated {'feature' if kind == 'feature' else 'fix'} for issue #{issue}{byline}.\n\nCloses #{issue}\n\n---\n{summary[:3000]}{human}"
         pr = await gh.open_pr(repo_path, base=s["base"], title=title, body=body)
 
         await gh.comment_issue(
