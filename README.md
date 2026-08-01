@@ -161,6 +161,10 @@ intake gate.
 .venv/bin/python -m pytest
 ```
 
+Changing this repo? [AGENTS.md](AGENTS.md) is the working guide — project shape,
+the two boundaries that keep an unattended runner safe, and why a merge does not
+deploy but a version bump does. [CONTRIBUTORS.md](CONTRIBUTORS.md) covers PRs.
+
 ## The model
 
 DeepSeek via LangChain `init_chat_model` ([llm.py](agent_loop/llm.py)). The API is
