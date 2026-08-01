@@ -138,6 +138,12 @@ needing a config edit before restart is **MAJOR** however small the diff.
 State the bump and the reason in the PR description — one line, so the next
 person reading `git log` can see what shipped and why it was sized that way.
 
+**The size decides how it deploys**, so it is not a label: MINOR and MAJOR
+interrupt the agent (wait for idle, then restart), while PATCH installs into the
+running process and defers the restart to the next idle moment. Calling a
+behaviour change a PATCH means the machine keeps the old behaviour until it
+happens to go idle — which is the failure mode to avoid, not a shortcut.
+
 *Why:* the version is what the release watcher compares against the deployed
 copy, so it is the only signal that says "this is meant to run". Leaving it
 alone used to mean "merge now, ship later", which quietly accumulated unshipped

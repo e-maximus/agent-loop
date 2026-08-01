@@ -7,8 +7,26 @@
 #
 # A release is a *version bump*: main is the working branch, so a new commit
 # alone means nothing. When `version` in pyproject.toml differs from what is
-# deployed, roll main forward — but only into an idle agent, and only if the
-# test suite passes on the new code. Anything else rolls back.
+# deployed, roll main forward — but only if the test suite passes on the new
+# code. Anything else rolls back.
+#
+# How the restart is handled depends on the size of the bump, because the
+# restart is the expensive part: `queue.stop()` cancels the in-flight task
+# rather than draining it, so an interrupted fix loses everything it has spent
+# on the strong model and starts from `baseline` on the next boot.
+#
+#   MINOR / MAJOR — new capability or a changed contract. Worth interrupting
+#     for: wait up to IDLE_TIMEOUT for the agent to go idle, then restart. If it
+#     is still busy, defer to the next tick rather than killing the task.
+#
+#   PATCH — a fix or a refactor. Not worth interrupting for: install it, then
+#     leave the running process alone and mark a restart as pending. The next
+#     tick that finds the agent idle applies it. So a patch reaches the machine
+#     immediately and takes effect at the next natural gap in the work.
+#
+# The cost of the patch path is a window where the checkout is newer than the
+# process running from it. `agent-loopctl status` reports that state rather than
+# claiming the new version is live.
 set -euo pipefail
 
 ROOT="${AGENT_LOOP_HOME:-$HOME/agent-loop-prod}"
@@ -18,6 +36,9 @@ DATA="$ROOT/data"
 LOGS="$DATA/logs"
 LOG="$LOGS/release-watch.log"
 LOCK="$DATA/.release-watch.lock"
+# Written when a patch is installed into a busy agent; cleared when the restart
+# it asks for has happened.
+PENDING="$DATA/.restart-pending"
 
 IDLE_TIMEOUT="${IDLE_TIMEOUT:-900}"   # wait up to 15 min for the agent to go idle
 HEALTH_WAIT="${HEALTH_WAIT:-30}"      # must stay up this long to count as deployed
@@ -54,6 +75,46 @@ pyproject_version() {  # $1 = git revision
     git show "$1:pyproject.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1
 }
 
+restart_agent() {
+    launchctl kickstart -k "gui/$(id -u)/$LABEL" >>"$LOG" 2>&1
+}
+
+agent_is_up() {
+    launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q "state = running"
+}
+
+running_tasks() {
+    /usr/bin/sqlite3 "$DATA/agent-loop.db" \
+        "SELECT COUNT(*) FROM tasks WHERE status='running'" 2>/dev/null || echo 0
+}
+
+bump_kind() {  # $1 = deployed version, $2 = incoming version → major|minor|patch
+    # Only the release segment matters; any -rc/+build suffix is dropped. An
+    # unreadable or absent deployed version is treated as major, because the
+    # safe answer to "how big is this change?" is "big enough to restart for".
+    local old="${1%%[-+]*}" new="${2%%[-+]*}"
+    case "$old" in [0-9]*.[0-9]*.*) ;; *) echo major; return ;; esac
+    case "$new" in [0-9]*.[0-9]*.*) ;; *) echo major; return ;; esac
+
+    local old_rest="${old#*.}" new_rest="${new#*.}"
+    if [ "${old%%.*}" != "${new%%.*}" ]; then
+        echo major
+    elif [ "${old_rest%%.*}" != "${new_rest%%.*}" ]; then
+        echo minor
+    else
+        echo patch
+    fi
+}
+
+# ── Apply a restart a previous patch deferred ─────────────────────────────
+# Runs before the deploy check: the agent may have gone idle since, and a patch
+# that is installed but not running is not yet a deployed patch.
+if [ -f "$PENDING" ] && [ "$(running_tasks)" = "0" ]; then
+    log "applying deferred restart for $(cat "$DATA/deployed.version" 2>/dev/null || echo "?")"
+    restart_agent
+    rm -f "$PENDING"
+fi
+
 # ── Is there anything to deploy? ──────────────────────────────────────────
 if ! git fetch --quiet origin main 2>>"$LOG"; then
     log "git fetch failed — offline?"
@@ -76,22 +137,27 @@ if [ "$remote_version" = "$local_version" ]; then
     exit 0
 fi
 
-log "release $local_version → $remote_version ($(git rev-parse --short=12 origin/main))"
+kind="$(bump_kind "$local_version" "$remote_version")"
+log "release $local_version → $remote_version ($kind, $(git rev-parse --short=12 origin/main))"
 
-# ── Wait for the agent to go idle ─────────────────────────────────────────
-# queue.stop() cancels the in-flight worker rather than draining it. The task
-# is re-queued on the next boot, so nothing is lost — but its LLM spend is.
-waited=0
-while [ "$waited" -lt "$IDLE_TIMEOUT" ]; do
-    running="$(/usr/bin/sqlite3 "$DATA/agent-loop.db" \
-        "SELECT COUNT(*) FROM tasks WHERE status='running'" 2>/dev/null || echo 0)"
-    [ "$running" = "0" ] && break
-    sleep 20
-    waited=$((waited + 20))
-done
-if [ "${running:-0}" != "0" ]; then
-    log "still busy after ${IDLE_TIMEOUT}s — deferring to the next tick"
-    exit 0
+# ── Wait for the agent to go idle — minor/major only ──────────────────────
+# A patch installs into a running agent and asks for a restart later, so there
+# is nothing to wait for. Bigger bumps interrupt: wait, and if the agent is
+# still working after IDLE_TIMEOUT, defer rather than cancel its task.
+if [ "$kind" = "patch" ]; then
+    log "patch release — installing without interrupting the agent"
+else
+    waited=0
+    while [ "$waited" -lt "$IDLE_TIMEOUT" ]; do
+        running="$(running_tasks)"
+        [ "$running" = "0" ] && break
+        sleep 20
+        waited=$((waited + 20))
+    done
+    if [ "${running:-0}" != "0" ]; then
+        log "still busy after ${IDLE_TIMEOUT}s — deferring to the next tick"
+        exit 0
+    fi
 fi
 
 # ── Roll forward ──────────────────────────────────────────────────────────
@@ -100,17 +166,16 @@ previous_sha="$(git rev-parse HEAD)"
 roll_back() {
     log "rolling back to $(git rev-parse --short=12 "$previous_sha") ($local_version)"
     git reset --hard --quiet "$previous_sha"
-    "$VENV/bin/pip" install -e ".[dev]" --quiet >>"$LOG" 2>&1 || true
+    "$VENV/bin/pip" install -e ".[dev]" -c constraints.txt --quiet >>"$LOG" 2>&1 || true
     printf '%s\n' "$previous_sha" >"$DATA/deployed.sha"
-    restart_agent
-}
-
-restart_agent() {
-    launchctl kickstart -k "gui/$(id -u)/$LABEL" >>"$LOG" 2>&1
-}
-
-agent_is_up() {
-    launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | grep -q "state = running"
+    # A patch that failed on the way in never restarted anything: the process is
+    # still running the code we just restored, so restarting would interrupt a
+    # task for nothing. Bigger bumps have already stopped the agent by here.
+    if [ "$kind" = "patch" ]; then
+        rm -f "$PENDING"
+    else
+        restart_agent
+    fi
 }
 
 git reset --hard --quiet "origin/main"
@@ -134,7 +199,18 @@ fi
 printf '%s\n' "$remote_sha" >"$DATA/deployed.sha"
 printf '%s\n' "$remote_version" >"$DATA/deployed.version"
 
+# ── Restart, or arrange for one ───────────────────────────────────────────
+if [ "$kind" = "patch" ] && [ "$(running_tasks)" != "0" ]; then
+    # Installed under a working agent. Leave it alone; the next tick that finds
+    # it idle picks the new code up. Health is not checked here because the
+    # process being verified is still the old one.
+    : >"$PENDING"
+    log "installed $remote_version — restart deferred until the agent is idle"
+    exit 0
+fi
+
 restart_agent
+rm -f "$PENDING"
 sleep "$HEALTH_WAIT"
 
 if ! agent_is_up; then

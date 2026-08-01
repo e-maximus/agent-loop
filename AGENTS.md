@@ -146,12 +146,30 @@ bump is no longer the place to hesitate. Hesitate at the merge instead: `main`
 is what reaches the machine, so a PR that is not ready to run is a PR that is
 not ready to merge.
 
-What a bump sets in motion, unattended: the watcher waits up to 15 minutes for
-the agent to go idle (`queue.stop()` cancels the in-flight task rather than
-draining it), resets the prod checkout to `main`, reinstalls, runs `pytest`,
-restarts, and checks the process is still up 30 seconds later. Anything red rolls
-back. A red `main` is therefore not a nuisance — it is a bad release rolling out
-to a machine that will retry it.
+What a bump sets in motion, unattended: the watcher resets the prod checkout to
+`main`, reinstalls against `constraints.txt`, runs `pytest`, and — if anything is
+red — rolls back. A red `main` is therefore not a nuisance; it is a bad release
+rolling out to a machine that will retry it.
+
+**How it restarts depends on the size of the bump**, because the restart is the
+expensive part: `queue.stop()` cancels the in-flight task rather than draining
+it, so an interrupted fix throws away its strong-model spend and restarts from
+`baseline` on the next boot.
+
+- **MINOR / MAJOR** — worth interrupting for. The watcher waits up to 15 minutes
+  for the agent to go idle, restarts, and checks the process is still up 30
+  seconds later. Still busy after the wait: defer to the next tick, never cancel.
+- **PATCH** — not worth interrupting for. It installs into the running agent and
+  marks a restart pending; the next tick that finds the agent idle applies it. A
+  patch therefore reaches the machine immediately and takes effect at the next
+  natural gap in the work.
+
+The patch path leaves a window where the checkout is newer than the process
+running from it, which is the price of not killing a task for a typo fix.
+`scripts/agent-loopctl status` flags that window explicitly rather than
+reporting a version nobody is running. So: **size the bump honestly** — a PATCH
+label on a behaviour change means the machine keeps running the old behaviour
+until it happens to go idle.
 
 ```bash
 scripts/agent-loopctl status     # version, state, running tasks
