@@ -10,3 +10,4 @@ agent-loop.config.yaml
 .DS_Store
 .coverage
 htmlcov/
+BACKLOG.md
