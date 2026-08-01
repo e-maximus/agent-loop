@@ -20,9 +20,11 @@ Short guide for opening a pull request in this repo. For the full working guide
   ```bash
   .venv/bin/python -m pytest -q
   ```
-- Decide whether this PR should deploy. Merging alone does not: the release
-  watcher ships when `version` in `pyproject.toml` changes. Bump it in this PR
-  if the change is worth rolling out to the machine, leave it if not.
+- **Bump `version` in `pyproject.toml`.** Every PR that changes code carries a
+  bump — PATCH / MINOR / MAJOR is your call, against the criteria in
+  [AGENTS.md](AGENTS.md#versioning--releases). Merging a code PR therefore ships
+  it: the release watcher deploys when that version changes. Docs-only PRs may
+  keep the version.
 
 ## PR description
 

@@ -120,7 +120,32 @@ worse than none, because it is believed.
 
 All committed and user-facing text is in **English**.
 
-## 10. What has to be green
+## 10. Every code change bumps the version
+
+`version` in `pyproject.toml` moves in the same PR as the change. Not "when it
+feels worth deploying" — always, for any PR that touches code. Docs-only PRs may
+keep it.
+
+**You classify the size yourself**, against the table in
+[AGENTS.md](AGENTS.md#versioning--releases): PATCH for a fix or a
+behaviour-preserving refactor, MINOR for new capability, a new config field, or
+changed pipeline behaviour, MAJOR when an existing `.env` /
+`agent-loop.config.yaml` stops working or a human step is needed before the
+deploy is safe. Two calls are not yours to make freely: a change to a boundary
+(`tools.py`, `exec.py`, `container.py`) is **at least MINOR**, and anything
+needing a config edit before restart is **MAJOR** however small the diff.
+
+State the bump and the reason in the PR description — one line, so the next
+person reading `git log` can see what shipped and why it was sized that way.
+
+*Why:* the version is what the release watcher compares against the deployed
+copy, so it is the only signal that says "this is meant to run". Leaving it
+alone used to mean "merge now, ship later", which quietly accumulated unshipped
+work whose combined behaviour nobody had ever run as a unit. The cost of the
+rule is that merging is now the moment of commitment — see §11, which is what
+makes that safe.
+
+## 11. What has to be green
 
 ```bash
 .venv/bin/python -m ruff check .          # lint

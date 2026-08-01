@@ -116,21 +116,35 @@ prompts, and anything the agent posts to GitHub.
 
 ## Versioning & releases
 
-Semantic Versioning: **PATCH** = fixes, **MINOR** = new capability in the
-pipeline or config, **MAJOR** = a change that breaks existing `.env` /
-`agent-loop.config.yaml` files.
+**Every PR that changes code bumps `version` in `pyproject.toml`.** You edit it
+by hand — the one thing this repo does opposite to most — in the same PR as the
+change. There is no "small enough to skip": a change worth merging is a change
+worth running on the machine.
+
+You decide how big it is. The judgement is the author's, and these are the
+criteria to make it with:
+
+| Bump | When |
+|---|---|
+| **PATCH** | A fix, a test, a comment, a refactor with no behaviour change. Nothing an operator would notice beyond the thing that was broken now working. |
+| **MINOR** | New capability, a new config field, or a change in how the pipeline behaves — different nodes, different prompts, different defaults. An operator would want to read the changelog. |
+| **MAJOR** | Existing `.env` or `agent-loop.config.yaml` files stop working, or a deployment needs a human step before it is safe. |
+
+Two rules make that judgement checkable rather than a vibe: **any change to a
+boundary** (`tools.py`, `exec.py`, `container.py`) is MINOR at least, because
+the operator's threat model moved; **anything requiring a config edit before
+restart** is MAJOR, no matter how few lines it took.
+
+Docs-only PRs — a README fix, this file — may keep the version, since there is
+nothing new to run.
 
 **Merging does not deploy. Bumping the version does.** The release watcher
 ([scripts/release-watch.sh](scripts/release-watch.sh)) fetches `main` every five
 minutes and exits unless `version` in `pyproject.toml` differs from what is
-deployed. So `main` can carry ordinary work — docs, refactors, tests — without
-rolling anything out to this machine.
-
-That makes the version bump a deliberate act, and the one thing this repo does
-opposite to most: **you do edit `version` in `pyproject.toml` by hand**, in the
-PR whose merge should ship. Bump it when the change is worth deploying; leave it
-alone when it is not. If you are unsure, leave it — an unshipped merge costs
-nothing, and the next bump carries it along.
+deployed. With the rule above, that means **merging a code PR ships it** — the
+bump is no longer the place to hesitate. Hesitate at the merge instead: `main`
+is what reaches the machine, so a PR that is not ready to run is a PR that is
+not ready to merge.
 
 What a bump sets in motion, unattended: the watcher waits up to 15 minutes for
 the agent to go idle (`queue.stop()` cancels the in-flight task rather than
