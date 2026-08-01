@@ -28,14 +28,15 @@ LLM call where the input is already gathered, and plain deterministic code where
 there is no judgement to make:
 
 ```
-intake gate ─▶ investigate ─▶ plan ─▶ implement ─┬─(no changes)──────────────▶ publish
- (LLM, host)    (agent,RO)    (LLM)   (agent)     └─(changes)─▶ write_tests ─▶ verify
-      │ reject                                                   (agent)     (deterministic:
-      ▼                                                                       lint+build+e2e)
-   decline    ┌──── implement (≤3 cycles) ◀── red / revise / sec-fail ──────────┤
-    (host)    ▼                                                                 │ green
-           (retry)                    critic ─approve─▶ security ─pass─▶ summarize ─▶ publish
-                                      (LLM review)     (scanners+LLM)
+intake gate ─▶ baseline ─▶ investigate ─▶ plan ─▶ implement ─┬─(no changes)──────────▶ publish
+ (LLM, host)  (determin.)   (agent,RO)    (LLM)   (agent)     └─(changes)─▶ write_tests ─▶ verify
+      │ reject                                                               (agent)     (determin.:
+      ▼                                                                                  lint+build+e2e)
+   decline    ┌──── implement (≤3 cycles) ◀─ CODE / revise / sec-fail ─ diagnose ◀── red ──┤
+    (host)    ▼                                    │                      (LLM)            │ green
+           (retry)                                 └─ ENVIRONMENT ─▶ summarize              │
+                                    critic ─approve─▶ security ─pass─▶ summarize ─▶ publish ┘
+                                    (LLM review)     (scanners+LLM)
 ```
 
 - **intake gate** — before any clone: an LLM judges whether the request is safe
@@ -46,9 +47,21 @@ intake gate ─▶ investigate ─▶ plan ─▶ implement ─┬─(no changes
 - **investigate / implement / write_tests** — tool-calling agents
   (`langchain.agents.create_agent`) with the Read/Write/Edit/Bash/Grep/Glob tools.
 - **plan / critic / summarize** — single, focused LLM calls.
-- **verify** — runs the configured commands (lint + build + e2e); a red result
-  loops back to `implement` with the failure log (bounded to 3 cycles, then it
-  escalates and opens the PR flagged for human review).
+- **baseline** — runs the same commands once on the untouched base branch,
+  before anything is written. A suite that needs a service or a secret the
+  container does not have fails identically whatever the diff does, so whatever
+  is red here is skipped when verifying the change, named in the PR body, and
+  flags the PR for human review. Costs one extra pass over the suite per task —
+  set `baselineVerify: false` where that is too slow.
+- **verify** — runs the configured commands (lint + build + e2e) minus the ones
+  baseline found already red; a red result goes to `diagnose`. Repeated lines in
+  a failure log are collapsed with a count, so a dev server logging the same
+  warning on every page load cannot evict the assertion that actually failed.
+- **diagnose** — one cheap LLM call on the failure log: `CODE` (the diff is
+  wrong) loops back to `implement` with the log, bounded to 3 cycles;
+  `ENVIRONMENT` (missing service, unreachable host, absent key — nothing a diff
+  repairs) goes straight to `summarize`, which states what the environment is
+  missing; `FLAKY` re-runs verify once. An unreadable verdict counts as `CODE`.
 - **security** — after the critic approves: runs any configured security
   scanners (`securityCommands`, e.g. `npm audit`/`semgrep`) plus an LLM security
   review of the diff. A finding loops back to `implement` within the same cycle
@@ -102,6 +115,13 @@ question):
 | `enhancement` | intake gate → implement → e2e test → security → PR (conservative) |
 | `question` | reply with an issue comment, **no code, no PR** (thread stays open) |
 
+Bug/feature issues are one-shot: enqueued once, never again. The task DB answers
+"already taken?" — but it is local and can be reset or lost, so an issue it has
+never seen is checked against GitHub too (an open PR on `issue-<n>`, or a comment
+of ours on the thread). Without that, a wiped DB re-runs finished work and then
+collides with its own open PR at `gh pr create`; when a PR for the branch does
+exist, `publish` adopts and updates it instead of failing the run.
+
 ## PR lifecycle
 
 Opening a PR does **not** close the task — it moves to `awaiting_review` and is
@@ -146,6 +166,13 @@ intake gate.
 DeepSeek via LangChain `init_chat_model` ([llm.py](agent_loop/llm.py)). The API is
 only the "brain" — the tool-use loop is LangGraph's and the tool executor is ours
 ([tools.py](agent_loop/tools.py)), so a different provider is a one-line change.
+
+Two models, not one. `implement` and `critic` run on `DEEPSEEK_MODEL_STRONG`
+(`deepseek-v4-pro`); every other node — investigate, plan, diagnose, security,
+summarize — runs on `DEEPSEEK_MODEL` (`deepseek-v4-flash`). Those two nodes write
+the diff and decide whether it stands, so weak work there is not cheaper: it comes
+back as another fix cycle, and each cycle re-runs the whole verify suite. Set both
+variables to the same value to go back to a single model.
 
 ## Running as a service
 

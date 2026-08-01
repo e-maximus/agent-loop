@@ -10,7 +10,7 @@ import signal
 from .config import load_sources, settings
 from .db import tasks
 from .github.source import GithubSource
-from .llm import make_llm
+from .llm import make_llm, make_strong_llm
 from .logging import create_logger
 from .queue import Queue
 from .version import BUILD
@@ -20,7 +20,11 @@ log = create_logger("main")
 
 async def main() -> None:
     log.info(f"agent-loop {BUILD} starting…")
-    log.info(f"provider: deepseek, model: {settings.deepseek_model}, max turns: {settings.agent_max_turns}")
+    log.info(
+        f"provider: deepseek, model: {settings.deepseek_model} "
+        f"(implement/critic: {settings.deepseek_model_strong}), "
+        f"max turns: {settings.agent_max_turns}"
+    )
 
     orphans = tasks.reset_orphans()
     if orphans:
@@ -28,6 +32,7 @@ async def main() -> None:
 
     source_cfgs = load_sources()
     llm = make_llm()
+    strong_llm = make_strong_llm()
 
     # The queue dispatches each task to the source instance that created it.
     sources: dict[str, GithubSource] = {}
@@ -40,7 +45,7 @@ async def main() -> None:
         return await src.run(task)
 
     queue = Queue(runner, concurrency=1)
-    sources = {cfg.id: GithubSource(cfg, queue, llm) for cfg in source_cfgs}
+    sources = {cfg.id: GithubSource(cfg, queue, llm, strong_llm) for cfg in source_cfgs}
 
     queue.start()
     for s in sources.values():

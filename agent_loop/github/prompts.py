@@ -49,6 +49,19 @@ VERDICT: PASS   (or)   VERDICT: FAIL
 If FAIL, add 1-3 short bullet points naming the exact vulnerability and file so the implementer can fix it. Only FAIL for real security problems. {ENGLISH_ONLY}"""
 
 
+def diagnose_prompt() -> str:
+    return f"""A build/test command failed during an automated fix. Decide whether a CODE CHANGE could fix this failure at all. You are given the command output (repeated lines are collapsed and annotated with a count).
+
+Answer on the FIRST line exactly ONE of:
+CAUSE: CODE        — the failure is in the code under change: a failed assertion, a type/lint/compile error, a runtime error in the project's own code, a test that describes behavior the diff got wrong.
+CAUSE: ENVIRONMENT — the failure is in the environment the tests run in, and no diff repairs it: a missing service (database, cache, browser), an unreachable host or blocked network, a missing API key/secret/env var, a failed dependency install or download, out of disk/memory, a missing system binary.
+CAUSE: FLAKY       — a timing/ordering/race failure that plausibly passes on a re-run: a timeout with no other error, a port already in use, an intermittent network blip.
+
+Judge by the evidence in the output, not by what would be convenient. When the output shows an assertion failure in the project's own tests, that is CODE even if other noise is present. When the only errors are about loading external resources, connecting to services, or absent credentials, that is ENVIRONMENT — say so rather than blaming the diff.
+
+After the first line, add 1-3 short bullet points quoting the exact evidence (error text, host, service, variable name) that decided it. If ENVIRONMENT, name precisely what is missing so a human can provide it. {ENGLISH_ONLY}"""
+
+
 def classify_comment_prompt() -> str:
     return f"""A human left a comment on an open pull request that an automated agent created. Classify what the agent should do with it.
 

@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     deepseek_api_key: str = Field(default="", alias="DEEPSEEK_API_KEY")
     deepseek_base_url: str = Field(default="https://api.deepseek.com", alias="DEEPSEEK_BASE_URL")
     deepseek_model: str = Field(default="deepseek-v4-flash", alias="DEEPSEEK_MODEL")
+    # The two nodes that decide what the diff actually is — writing the code and
+    # reviewing it — run on a stronger model than the rest of the pipeline. A
+    # weak implement produces work the whole loop then spends cycles repairing,
+    # and a weak critic waves it through. Reading, planning and summarising are
+    # cheap by comparison and stay on the default model. Set this to the same
+    # value as DEEPSEEK_MODEL to put everything back on one model.
+    deepseek_model_strong: str = Field(default="deepseek-v4-pro", alias="DEEPSEEK_MODEL_STRONG")
 
     # Max agent steps per react-loop before it is force-stopped (cost guard).
     agent_max_turns: int = Field(default=100, alias="AGENT_MAX_TURNS")
@@ -97,6 +104,11 @@ class GithubSourceConfig(BaseModel):
         default=["npm run lint", "npm run build", "npx playwright test"],
         alias="verifyCommands",
     )
+    # Run the verify commands once on the base branch before touching anything,
+    # so a suite that is already red (missing service, absent secret) is known to
+    # be an environment fact and does not gate the PR or burn fix cycles. Costs
+    # one extra pass over the suite per task — turn it off where that is too slow.
+    baseline_verify: bool = Field(default=True, alias="baselineVerify")
     # Add an "agent-loop" trailer to commit messages and a byline to PR bodies.
     # Some repos forbid AI attribution in git artifacts (goals-app's AGENTS.md
     # does) — turn this off there. Issue/PR *comments* keep their 🤖 prefix
