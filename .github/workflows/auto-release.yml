@@ -37,6 +37,14 @@ jobs:
         with:
           ref: main
           fetch-depth: 0 # full history + tags, so the notes span the last release
+          # `main` is covered by a ruleset, and GITHUB_TOKEN cannot bypass one:
+          # the bypass list takes roles, org members and GitHub Apps, and the
+          # Actions app is not addable on a user-owned repository. So the bump
+          # push needs a credential that belongs to an actor the ruleset does
+          # let through — a fine-grained PAT or a GitHub App token, stored as
+          # RELEASE_TOKEN. Without it this job reaches `git push` and fails
+          # there, which is loud, contained, and leaves nothing behind.
+          token: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
       - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
@@ -54,7 +62,12 @@ jobs:
         # broken install cannot block a release that is already merged.
         run: python scripts/bump_version.py --labels "$LABELS" >> "$GITHUB_OUTPUT"
 
-      - name: Commit and tag
+      # The branch goes first and the tag only after it lands. `--follow-tags`
+      # pushed both at once, and since tags are not covered by the branch
+      # ruleset, a rejected branch push still left the tag behind — pointing at
+      # a commit no longer reachable, and blocking the next attempt at the same
+      # version. A failed release must leave the repository exactly as it was.
+      - name: Commit and push the bump
         env:
           VERSION: ${{ steps.bump.outputs.version }}
           PR: ${{ github.event.pull_request.number }}
@@ -62,8 +75,14 @@ jobs:
         run: |
           git add pyproject.toml
           git commit -m "release: v$VERSION" -m "$TITLE (#$PR)"
+          git push origin main
+
+      - name: Tag the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
           git tag -a "v$VERSION" -m "Release v$VERSION"
-          git push --follow-tags origin main
+          git push origin "v$VERSION"
 
       - name: Publish GitHub Release
         env:
