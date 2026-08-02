@@ -59,6 +59,11 @@ jobs:
   # The release bump belongs to auto-release.yml, which applies it on main after
   # the merge. A PR that edits the line itself is how every other open PR gets a
   # conflict, and how two PRs merged in the wrong order ship the same version.
+  #
+  # The `release:manual` label switches this off, for the one case the rule
+  # cannot cover: a release run that never landed its bump, leaving main behind
+  # what it has actually shipped. Someone then has to move the line by hand, and
+  # the label is that decision written down where the diff is reviewed.
   version:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
@@ -69,13 +74,24 @@ jobs:
       - name: Version must not be hand-edited
         env:
           BASE: ${{ github.base_ref }}
-        # Diffed from the merge base, not from the tip of the base branch: every
-        # merge lands a bump on main, so comparing against the tip would fail
-        # every branch that is merely a release behind.
+          PR: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # The labels are read now rather than taken from the event payload: the
+        # payload is frozen when the run starts, so a label added to fix a red
+        # check would not be seen until someone pushed a commit to re-trigger.
+        # Read at run time, re-running the job is enough.
+        #
+        # The diff is from the merge base, not from the tip of the base branch:
+        # every merge lands a bump on main, so comparing against the tip would
+        # fail every branch that is merely a release behind.
         run: |
+          if gh pr view "$PR" --json labels -q '.labels[].name' | grep -qx 'release:manual'; then
+            echo "release:manual — the version line may be edited in this PR"
+            exit 0
+          fi
           git fetch --no-tags origin "$BASE"
           if git diff "origin/$BASE...HEAD" -- pyproject.toml | grep -q '^[-+]version = '; then
-            echo "::error file=pyproject.toml::this PR edits the version line. Revert it and set the level with a release:minor / release:major label instead — the merge bumps the version on main."
+            echo "::error file=pyproject.toml::this PR edits the version line. Revert it and set the level with a release:minor / release:major label instead — the merge bumps the version on main. If a release run was lost and main must be moved by hand, label the PR release:manual."
             exit 1
           fi
           echo "ok: the version line is untouched"
