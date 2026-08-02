@@ -156,6 +156,15 @@ differs from what is deployed. The bump commit lands seconds after the merge, so
 a tick that catches the gap simply finds no new version and waits for the next
 one.
 
+**The workflow needs a `RELEASE_TOKEN` secret.** `main` is covered by a ruleset,
+and `GITHUB_TOKEN` cannot bypass one — the bypass list takes roles, org members
+and GitHub Apps, and the Actions app cannot be added on a user-owned repository.
+So the bump push authenticates as a fine-grained PAT (contents: read and write on
+this repo) or a GitHub App token, stored as the `RELEASE_TOKEN` secret, and the
+ruleset's bypass list names that actor. Without the secret the job runs to
+`git push` and fails there: merges still work, `main` stays green, and nothing
+deploys until it is fixed — visible rather than silent.
+
 What a bump sets in motion, unattended: the watcher resets the prod checkout to
 `main`, reinstalls against `constraints.txt`, runs `pytest`, and — if anything is
 red — rolls back. A red `main` is therefore not a nuisance; it is a bad release
