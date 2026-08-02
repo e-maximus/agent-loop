@@ -167,6 +167,14 @@ docs-only PR ships a patch. Hesitate at the merge, then: `main` is what reaches
 the machine, so a PR that is not ready to run is a PR that is not ready to
 merge.
 
+There is one escape hatch, `release:manual`, and it exists for a single
+situation: a release run that failed or was cancelled before it pushed its bump,
+leaving `main` behind the work it already carries. Then the line has to move by
+hand, so that label turns the CI guard off for that PR. Use
+`scripts/bump_version.py --level <patch|minor|major>` to make the edit rather
+than typing a number, and say in the PR description which releases were lost.
+Any other use of the label is a bug in how the PR was labelled.
+
 The release watcher ([scripts/release-watch.sh](scripts/release-watch.sh))
 fetches `main` every five minutes and exits unless `version` in `pyproject.toml`
 differs from what is deployed. The bump commit lands seconds after the merge, so

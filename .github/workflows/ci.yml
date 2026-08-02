@@ -59,8 +59,15 @@ jobs:
   # The release bump belongs to auto-release.yml, which applies it on main after
   # the merge. A PR that edits the line itself is how every other open PR gets a
   # conflict, and how two PRs merged in the wrong order ship the same version.
+  #
+  # The `release:manual` label switches this off, for the one case the rule
+  # cannot cover: a release run that never landed its bump, leaving main behind
+  # what it has actually shipped. Someone then has to move the line by hand, and
+  # the label is that decision written down where the diff is reviewed.
   version:
-    if: github.event_name == 'pull_request'
+    if: >-
+      github.event_name == 'pull_request' &&
+      !contains(github.event.pull_request.labels.*.name, 'release:manual')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
