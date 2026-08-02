@@ -108,43 +108,53 @@ prompts, and anything the agent posts to GitHub.
   produces the conflicts you fight later.
 - `main` is protected — no direct pushes. `scripts/install-hooks.sh` installs a
   pre-push hook that says so before the network round-trip. Open a PR; CI must be
-  green before merge.
+  green before merge. The one writer to `main` besides a merge is the release
+  bump commit, and that is a workflow, not a person.
 - **Before opening a PR, sync with `main` and confirm it is conflict-free**:
   `git fetch origin`, `git rebase origin/main`, and check `gh pr view <n> --json
-  mergeable,mergeStateStatus`.
+  mergeable,mergeStateStatus`. `main` moves on its own — every merge adds a
+  release bump commit — so a branch that sat for a day is behind.
 - Write a clear PR title and description — see [CONTRIBUTORS.md](CONTRIBUTORS.md).
+  The title becomes the changelog entry for the release the merge cuts.
+- **Set the release level with a label** before merging — see
+  [Versioning & releases](#versioning--releases). No label means a patch.
 
 ## Versioning & releases
 
-**Every PR that changes code bumps `version` in `pyproject.toml`.** You edit it
-by hand — the one thing this repo does opposite to most — in the same PR as the
-change. There is no "small enough to skip": a change worth merging is a change
-worth running on the machine.
+**Do not hand-edit `version` in `pyproject.toml`.** Merging a PR into `main`
+bumps it automatically
+([.github/workflows/auto-release.yml](.github/workflows/auto-release.yml)): the
+workflow bumps the version on `main`, tags `vx.y.z` and publishes a GitHub
+Release whose notes are generated from the PRs since the last tag. CI fails a PR
+that touches the line — a PR carrying a bump conflicts with every other open PR
+the moment one of them lands, which is exactly the friction this replaces. Two
+things follow: **write a clear PR title**, because it becomes the changelog, and
+`main` may have moved under you since you branched, so rebase before asking for
+a merge.
 
-You decide how big it is. The judgement is the author's, and these are the
-criteria to make it with:
+Your job is to set the *level*, with a label on the PR:
 
-| Bump | When |
-|---|---|
-| **PATCH** | A fix, a test, a comment, a refactor with no behaviour change. Nothing an operator would notice beyond the thing that was broken now working. |
-| **MINOR** | New capability, a new config field, or a change in how the pipeline behaves — different nodes, different prompts, different defaults. An operator would want to read the changelog. |
-| **MAJOR** | Existing `.env` or `agent-loop.config.yaml` files stop working, or a deployment needs a human step before it is safe. |
+| PR label | Bump | When |
+|---|---|---|
+| _(none)_ | **PATCH** | The default. A fix, a test, a comment, a refactor with no behaviour change. Nothing an operator would notice beyond the thing that was broken now working. |
+| `release:minor` | **MINOR** | New capability, a new config field, or a change in how the pipeline behaves — different nodes, different prompts, different defaults. An operator would want to read the changelog. |
+| `release:major` | **MAJOR** | Existing `.env` or `agent-loop.config.yaml` files stop working, or a deployment needs a human step before it is safe. |
 
 Two rules make that judgement checkable rather than a vibe: **any change to a
-boundary** (`tools.py`, `exec.py`, `container.py`) is MINOR at least, because
-the operator's threat model moved; **anything requiring a config edit before
-restart** is MAJOR, no matter how few lines it took.
+boundary** (`tools.py`, `exec.py`, `container.py`) is `release:minor` at least,
+because the operator's threat model moved; **anything requiring a config edit
+before restart** is `release:major`, no matter how few lines it took.
 
-Docs-only PRs — a README fix, this file — may keep the version, since there is
-nothing new to run.
+**Patch is the floor — there is no way to merge without releasing.** Even a
+docs-only PR ships a patch. Hesitate at the merge, then: `main` is what reaches
+the machine, so a PR that is not ready to run is a PR that is not ready to
+merge.
 
-**Merging does not deploy. Bumping the version does.** The release watcher
-([scripts/release-watch.sh](scripts/release-watch.sh)) fetches `main` every five
-minutes and exits unless `version` in `pyproject.toml` differs from what is
-deployed. With the rule above, that means **merging a code PR ships it** — the
-bump is no longer the place to hesitate. Hesitate at the merge instead: `main`
-is what reaches the machine, so a PR that is not ready to run is a PR that is
-not ready to merge.
+The release watcher ([scripts/release-watch.sh](scripts/release-watch.sh))
+fetches `main` every five minutes and exits unless `version` in `pyproject.toml`
+differs from what is deployed. The bump commit lands seconds after the merge, so
+a tick that catches the gap simply finds no new version and waits for the next
+one.
 
 What a bump sets in motion, unattended: the watcher resets the prod checkout to
 `main`, reinstalls against `constraints.txt`, runs `pytest`, and — if anything is
@@ -167,9 +177,9 @@ it, so an interrupted fix throws away its strong-model spend and restarts from
 The patch path leaves a window where the checkout is newer than the process
 running from it, which is the price of not killing a task for a typo fix.
 `scripts/agent-loopctl status` flags that window explicitly rather than
-reporting a version nobody is running. So: **size the bump honestly** — a PATCH
-label on a behaviour change means the machine keeps running the old behaviour
-until it happens to go idle.
+reporting a version nobody is running. So: **label honestly** — a behaviour
+change left unlabelled ships as a patch, and the machine keeps running the old
+behaviour until it happens to go idle.
 
 ```bash
 scripts/agent-loopctl status     # version, state, running tasks
@@ -184,6 +194,14 @@ the watcher runs `git reset --hard` in it.
 Commit messages describe **why**, then what. The history here is written to be
 read later — a bare `fix: bug` is worth less than the two sentences saying what
 was actually wrong.
+
+**No tool attribution in commits or PR bodies.** Do not append
+`Co-Authored-By: Claude …`, `🤖 Generated with Claude Code`, or any equivalent
+trailer — the commit says why the change was made, not what typed it.
+[.claude/settings.json](.claude/settings.json) turns those trailers off for
+Claude Code (`attribution.commit`/`attribution.pr` empty, plus the older
+`includeCoAuthoredBy: false`); this paragraph is the rule for every other tool
+and for the case where the settings file is not read.
 
 Do not confuse this repo's attribution with the `gitAttribution` source option:
 that flag controls what the agent writes in *other people's* repos. Here, follow

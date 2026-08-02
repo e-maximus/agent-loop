@@ -46,3 +46,26 @@ jobs:
       # Fully mocked — no network, LLM, or Docker.
       - name: Tests
         run: pytest -q --cov --cov-report=term-missing
+
+  # The release bump belongs to auto-release.yml, which applies it on main after
+  # the merge. A PR that edits the line itself is how every other open PR gets a
+  # conflict, and how two PRs merged in the wrong order ship the same version.
+  version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Version must not be hand-edited
+        env:
+          BASE: ${{ github.base_ref }}
+        run: |
+          git fetch --no-tags --depth=1 origin "$BASE"
+          base=$(git show "origin/$BASE:pyproject.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
+          head=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "$base" != "$head" ]; then
+            echo "::error file=pyproject.toml::version was edited by hand ($base -> $head). Revert it and set the level with a release:minor / release:major label instead — the merge bumps it."
+            exit 1
+          fi
+          echo "ok: version untouched ($head)"

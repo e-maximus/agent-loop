@@ -1,6 +1,6 @@
 [project]
 name = "agent-loop"
-version = "0.5.0"
+version = "0.4.0"
 description = "Autonomous coding-agent runner: GitHub issue auto-fix, run locally in Docker. Python + LangGraph."
 requires-python = ">=3.12"
 license = { text = "MIT" }

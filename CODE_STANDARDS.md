@@ -120,28 +120,29 @@ worse than none, because it is believed.
 
 All committed and user-facing text is in **English**.
 
-## 10. Every code change bumps the version
+## 10. Every merge releases; you only choose how big
 
-`version` in `pyproject.toml` moves in the same PR as the change. Not "when it
-feels worth deploying" — always, for any PR that touches code. Docs-only PRs may
-keep it.
+`version` in `pyproject.toml` is not yours to edit — the merge bumps it on
+`main` and CI fails a PR that touches the line. Every merged PR releases,
+docs included; patch is the floor.
 
-**You classify the size yourself**, against the table in
-[AGENTS.md](AGENTS.md#versioning--releases): PATCH for a fix or a
-behaviour-preserving refactor, MINOR for new capability, a new config field, or
-changed pipeline behaviour, MAJOR when an existing `.env` /
+**You classify the size yourself**, with a label, against the table in
+[AGENTS.md](AGENTS.md#versioning--releases): no label for a fix or a
+behaviour-preserving refactor, `release:minor` for new capability, a new config
+field, or changed pipeline behaviour, `release:major` when an existing `.env` /
 `agent-loop.config.yaml` stops working or a human step is needed before the
 deploy is safe. Two calls are not yours to make freely: a change to a boundary
-(`tools.py`, `exec.py`, `container.py`) is **at least MINOR**, and anything
-needing a config edit before restart is **MAJOR** however small the diff.
+(`tools.py`, `exec.py`, `container.py`) is **at least `release:minor`**, and
+anything needing a config edit before restart is **`release:major`** however
+small the diff.
 
-State the bump and the reason in the PR description — one line, so the next
+Say in the PR description why you labelled it that way — one line, so the next
 person reading `git log` can see what shipped and why it was sized that way.
 
-**The size decides how it deploys**, so it is not a label: MINOR and MAJOR
-interrupt the agent (wait for idle, then restart), while PATCH installs into the
-running process and defers the restart to the next idle moment. Calling a
-behaviour change a PATCH means the machine keeps the old behaviour until it
+**The size decides how it deploys**, so the label is not decoration: MINOR and
+MAJOR interrupt the agent (wait for idle, then restart), while PATCH installs
+into the running process and defers the restart to the next idle moment. Leaving
+a behaviour change unlabelled means the machine keeps the old behaviour until it
 happens to go idle — which is the failure mode to avoid, not a shortcut.
 
 *Why:* the version is what the release watcher compares against the deployed
