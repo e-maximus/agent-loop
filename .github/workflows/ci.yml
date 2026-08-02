@@ -60,12 +60,13 @@ jobs:
       - name: Version must not be hand-edited
         env:
           BASE: ${{ github.base_ref }}
+        # Diffed from the merge base, not from the tip of the base branch: every
+        # merge lands a bump on main, so comparing against the tip would fail
+        # every branch that is merely a release behind.
         run: |
-          git fetch --no-tags --depth=1 origin "$BASE"
-          base=$(git show "origin/$BASE:pyproject.toml" | sed -n 's/^version = "\(.*\)"/\1/p' | head -1)
-          head=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
-          if [ "$base" != "$head" ]; then
-            echo "::error file=pyproject.toml::version was edited by hand ($base -> $head). Revert it and set the level with a release:minor / release:major label instead — the merge bumps it."
+          git fetch --no-tags origin "$BASE"
+          if git diff "origin/$BASE...HEAD" -- pyproject.toml | grep -q '^[-+]version = '; then
+            echo "::error file=pyproject.toml::this PR edits the version line. Revert it and set the level with a release:minor / release:major label instead — the merge bumps the version on main."
             exit 1
           fi
-          echo "ok: version untouched ($head)"
+          echo "ok: the version line is untouched"
