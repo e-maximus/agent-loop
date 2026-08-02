@@ -204,3 +204,33 @@ flight or was recently closed by us.
 **Why.** The poller only knows "was *this* issue taken"
 ([poller.py](agent_loop/github/poller.py)). Two issues describing one bug get two
 full pipelines and two competing PRs.
+
+---
+
+## release-run-concurrency-drops-bumps
+
+`Type: ops · Priority: high · Effort: S · Added: 2026-08-02`
+
+**Idea.** Make `auto-release.yml` survive several merges landing close together
+— either by computing the bump from every PR merged since the last release
+rather than only the one that triggered the run, or by retrying the run instead
+of letting it be superseded.
+
+**Why.** The workflow uses `concurrency: {group: auto-release,
+cancel-in-progress: false}`, which serializes runs but keeps only *one* pending
+run per group: a third merge cancels the second's queued run. Observed on
+2026-08-02 — merging #12, #4, #3, #5 in a row produced two `failure` runs and
+two `cancelled` ones. A cancelled run is a merge that never released, and since
+the level comes from that PR's labels, a `release:minor` swallowed by a later
+patch is a behaviour change that reaches the machine labelled as a fix.
+
+**Where.** [.github/workflows/auto-release.yml](.github/workflows/auto-release.yml)
+and `level_from_labels` in [scripts/bump_version.py](scripts/bump_version.py) —
+which already takes a comma-separated label string, so feeding it the union of
+labels from every PR merged since the last tag is a small change.
+
+**Blocked on.** `RELEASE_TOKEN` — until releases can push to `main` at all, this
+is invisible.
+
+**Done when.** Four merges in a minute produce one release whose level is the
+largest any of them asked for.
