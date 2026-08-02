@@ -36,7 +36,18 @@ def test_the_allowlist_keeps_what_a_build_needs(monkeypatch):
     assert env["HOME"] == "/home/agent"
     assert env["LANG"] == "en_US.UTF-8"
     assert env["NVM_DIR"] == "/home/agent/.nvm"
-    assert env["CI"] == "1"
+
+
+def test_ci_is_marked_without_overriding_a_real_one(monkeypatch):
+    """Build tools branch on CI, so it is always set — but a host that already
+    defines it (GitHub Actions uses "true") keeps its own value. Asserting the
+    literal "1" made this test pass locally and fail in CI, which is exactly the
+    environment dependence a mocked suite is supposed to avoid."""
+    monkeypatch.delenv("CI", raising=False)
+    assert agent_env()["CI"] == "1"
+
+    monkeypatch.setenv("CI", "true")
+    assert agent_env()["CI"] == "true"
 
 
 async def test_host_shell_runs_with_the_scrubbed_environment(monkeypatch):
