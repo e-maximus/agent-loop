@@ -8,3 +8,5 @@ data/
 agent-loop.config.yaml
 *.log
 .DS_Store
+.coverage
+htmlcov/

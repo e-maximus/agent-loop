@@ -36,8 +36,12 @@ status)
     running="$(/usr/bin/sqlite3 "$ROOT/data/agent-loop.db" \
         "SELECT COUNT(*) FROM tasks WHERE status='running'" 2>/dev/null || echo '?')"
     echo "checkout : $ROOT"
+    # A patch installed into a busy agent is on disk but not in the running
+    # process. Say so: "version" would otherwise report code nobody is running.
+    pending=""
+    [ -f "$ROOT/data/.restart-pending" ] && pending="  ⚠ installed, awaiting restart (agent still on the previous version)"
     echo "version  : $(cat "$ROOT/data/deployed.version" 2>/dev/null || echo 'never deployed') \
-($(cat "$ROOT/data/deployed.sha" 2>/dev/null | cut -c1-12 || echo '-'))"
+($(cat "$ROOT/data/deployed.sha" 2>/dev/null | cut -c1-12 || echo '-'))$pending"
     echo "agent    : $(launchctl print "$DOMAIN/$LABEL" 2>/dev/null | awk -F' = ' '/state = /{print $2; exit}' || echo 'not loaded')"
     echo "watcher  : $(launchctl print "$DOMAIN/$WATCH_LABEL" >/dev/null 2>&1 && echo loaded || echo 'not loaded')"
     echo "running tasks: $running"

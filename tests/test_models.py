@@ -4,7 +4,7 @@ these tests cover the wiring that decides which one a node gets."""
 
 from __future__ import annotations
 
-from agent_loop.config import GithubSourceConfig, settings
+from agent_loop.config import GithubSourceConfig, get_settings
 from agent_loop.github.source import GithubSource
 from tests.test_triage import DummyQueue, FakeLLM
 
@@ -12,6 +12,7 @@ from tests.test_triage import DummyQueue, FakeLLM
 def test_strong_model_defaults_to_a_different_model():
     # If these ever collapse to one value the split silently stops existing, and
     # every node quietly runs on the same model again.
+    settings = get_settings()
     assert settings.deepseek_model_strong != settings.deepseek_model
 
 

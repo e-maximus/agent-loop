@@ -1,0 +1,72 @@
+name: Auto Release
+
+# Merging a PR into main cuts the release. The `version` in pyproject.toml is
+# what the release watcher deploys, so it has to move on every merge — but a PR
+# that edits it conflicts with every other open PR the moment one of them lands.
+# So this workflow owns that line: it bumps once, on main, after the merge.
+#
+# Level comes from the merged PR's labels:
+#   release:major -> major   release:minor -> minor   (no label) -> patch
+#
+# Patch is the floor: every merged PR ships, including docs and chores. That is
+# the same bargain as before — `main` is what reaches the machine, so a PR that
+# is not ready to run is a PR that is not ready to merge.
+on:
+  pull_request:
+    types: [closed]
+    branches: [main]
+
+# The only workflow in this repo that writes to the repo, and the reason is the
+# bump commit below. CI stays read-only.
+permissions:
+  contents: write
+
+# Serialize releases: two merges landing together must not race on pushing main.
+concurrency:
+  group: auto-release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      # Actions are pinned by commit SHA — a tag can be moved, and this job holds
+      # a write token.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: main
+          fetch-depth: 0 # full history + tags, so the notes span the last release
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
+        with:
+          python-version: "3.12"
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Bump version
+        id: bump
+        env:
+          LABELS: ${{ join(github.event.pull_request.labels.*.name, ',') }}
+        # No dependencies installed: the script is stdlib-only on purpose, so a
+        # broken install cannot block a release that is already merged.
+        run: python scripts/bump_version.py --labels "$LABELS" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and tag
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+          PR: ${{ github.event.pull_request.number }}
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          git add pyproject.toml
+          git commit -m "release: v$VERSION" -m "$TITLE (#$PR)"
+          git tag -a "v$VERSION" -m "Release v$VERSION"
+          git push --follow-tags origin main
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: gh release create "v$VERSION" --title "v$VERSION" --generate-notes

@@ -7,14 +7,66 @@ on:
   push:
     branches: [main]
 
+# Nothing here needs to write to the repo. Least privilege by default: a
+# compromised action in the dependency tree gets a read-only token.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The dependency set this release was tested against; the deploy watcher
+  # installs with the same file, so CI proves what actually ships.
+  PIP_CONSTRAINT: constraints.txt
+
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # Actions are pinned by commit SHA: a tag can be moved, and this workflow
+      # runs on pull_request from forks.
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/setup-python@0b93645e9fea7318ecaed2b359559ac225c90a2b # v5.3.0
         with:
           python-version: "3.12"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            constraints.txt
       - run: pip install -e ".[dev]"
+
+      - name: Lint
+        run: ruff check --output-format=github .
+      - name: Format
+        run: ruff format --check .
+      - name: Types
+        run: pyright
       # Fully mocked — no network, LLM, or Docker.
-      - run: python -m pytest -q
+      - name: Tests
+        run: pytest -q --cov --cov-report=term-missing
+
+  # The release bump belongs to auto-release.yml, which applies it on main after
+  # the merge. A PR that edits the line itself is how every other open PR gets a
+  # conflict, and how two PRs merged in the wrong order ship the same version.
+  version:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+      - name: Version must not be hand-edited
+        env:
+          BASE: ${{ github.base_ref }}
+        # Diffed from the merge base, not from the tip of the base branch: every
+        # merge lands a bump on main, so comparing against the tip would fail
+        # every branch that is merely a release behind.
+        run: |
+          git fetch --no-tags origin "$BASE"
+          if git diff "origin/$BASE...HEAD" -- pyproject.toml | grep -q '^[-+]version = '; then
+            echo "::error file=pyproject.toml::this PR edits the version line. Revert it and set the level with a release:minor / release:major label instead — the merge bumps the version on main."
+            exit 1
+          fi
+          echo "ok: the version line is untouched"

@@ -1,14 +1,17 @@
 """In-process asyncio queue backed by SQLite.
 
 Single machine, so no Redis: tasks are persisted in the `tasks` table and this
-class pumps them through a bounded worker pool. Survives restarts (queued tasks
-are picked up again; interrupted 'running' ones are marked failed on boot).
+class pumps them through a bounded worker pool. Survives restarts: queued tasks
+are picked up again, and tasks still marked 'running' after a crash are put back
+on the queue by `reset_orphans()` — an interruption is not a failure, and
+'failed' is terminal (never re-run).
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable
+import traceback
+from collections.abc import Awaitable, Callable
 
 from .db import TaskRow, tasks
 from .logging import create_logger
@@ -49,7 +52,7 @@ class Queue:
             if task is None:
                 try:
                     await asyncio.wait_for(self._wake.wait(), timeout=_IDLE_POLL_S)
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
                 continue
             await self._execute(task)
@@ -66,8 +69,6 @@ class Queue:
                 tasks.finish_done(task.id, result)
             log.info(f"✓ task #{task.id} finished ({(tasks.get(task.id) or task).status})")
         except Exception as err:  # noqa: BLE001 — a task failing must not kill the worker
-            import traceback
-
             message = "".join(traceback.format_exception(err))
             tasks.finish_failed(task.id, message)
             log.error(f"✗ task #{task.id} failed", message)

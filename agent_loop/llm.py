@@ -10,10 +10,11 @@ from __future__ import annotations
 from langchain.chat_models import init_chat_model
 from langchain_core.language_models import BaseChatModel
 
-from .config import settings
+from .config import get_settings
 
 
 def make_llm(model: str | None = None) -> BaseChatModel:
+    settings = get_settings()
     return init_chat_model(
         model or settings.deepseek_model,
         model_provider="deepseek",
@@ -26,4 +27,4 @@ def make_llm(model: str | None = None) -> BaseChatModel:
 def make_strong_llm() -> BaseChatModel:
     """The model for implement and critic — see DEEPSEEK_MODEL_STRONG in
     config.py for why those two nodes get their own."""
-    return make_llm(settings.deepseek_model_strong)
+    return make_llm(get_settings().deepseek_model_strong)

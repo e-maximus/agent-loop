@@ -34,13 +34,13 @@ whether it stands.
 
 from __future__ import annotations
 
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, TypedDict, cast
 
 from langchain.agents import create_agent
 from langchain_core.language_models import BaseChatModel
 from langgraph.graph import END, START, StateGraph
 
-from ..config import GithubSourceConfig, settings
+from ..config import GithubSourceConfig, get_settings
 from ..container import ExecEnv
 from ..logging import create_logger
 from ..tools import build_tools, describe_tool
@@ -56,8 +56,11 @@ MAX_VERIFY_RETRIES = 1
 # of it to hand the model.
 VERIFY_LOG_TAIL = 2000
 VERIFY_MODEL_TAIL = 4000
-# react recursion limit derived from the turn budget (each turn ≈ model + tools).
-_RECURSION = settings.agent_max_turns * 2 + 1
+
+
+def _recursion_limit() -> int:
+    """react recursion limit derived from the turn budget (each turn ≈ model + tools)."""
+    return get_settings().agent_max_turns * 2 + 1
 
 
 def condense(text: str, limit: int) -> str:
@@ -88,8 +91,11 @@ def condense(text: str, limit: int) -> str:
     return "\n".join(out)[-limit:]
 
 
-class AutofixState(TypedDict, total=False):
-    # ── input (from the poller task) ──
+class _AutofixInput(TypedDict):
+    """What the source runner puts in before the graph starts. Required, so a
+    node reading `s["issue"]` is a plain access — the split is what lets the
+    optional half below stay honest about being optional."""
+
     repo: str
     issue: int
     kind: str  # "bug" | "feature"
@@ -99,6 +105,9 @@ class AutofixState(TypedDict, total=False):
     base: str
     branch: str
     repo_path: str
+
+
+class AutofixState(_AutofixInput, total=False):
     # "rework" when re-entering to address CI/review feedback on an existing PR;
     # empty/absent for a first pass that opens a new PR.
     mode: str
@@ -142,7 +151,7 @@ def after_implement(s: AutofixState) -> Literal["write_tests", "publish"]:
 
 
 def after_verify(s: AutofixState) -> Literal["critic", "diagnose"]:
-    return "critic" if s["build_ok"] else "diagnose"
+    return "critic" if s.get("build_ok", False) else "diagnose"
 
 
 def after_diagnose(s: AutofixState) -> Literal["verify", "implement", "summarize"]:
@@ -153,14 +162,14 @@ def after_diagnose(s: AutofixState) -> Literal["verify", "implement", "summarize
     if cause != "CODE":
         # No diff fixes this. Publish what we have, labelled, and let a human
         # fix the environment instead of burning cycles pretending otherwise.
-        log.warn(
+        log.warning(
             f"#{s['issue']}: verify is red for a reason no code change fixes "
             f"({cause}) — escalating\n{s.get('failure_reason', '')[:VERIFY_LOG_TAIL]}"
         )
         return "summarize"
     if s.get("implement_runs", 0) < MAX_FIX_CYCLES:
         return "implement"
-    log.warn(f"#{s['issue']}: build still red after {MAX_FIX_CYCLES} cycles — escalating")
+    log.warning(f"#{s['issue']}: build still red after {MAX_FIX_CYCLES} cycles — escalating")
     return "summarize"
 
 
@@ -179,7 +188,7 @@ def after_security(s: AutofixState) -> Literal["summarize", "implement"]:
         return "summarize"
     if s.get("implement_runs", 0) < MAX_FIX_CYCLES:
         return "implement"
-    log.warn(f"#{s['issue']}: security still failing after {MAX_FIX_CYCLES} cycles — escalating")
+    log.warning(f"#{s['issue']}: security still failing after {MAX_FIX_CYCLES} cycles — escalating")
     return "summarize"
 
 
@@ -216,9 +225,11 @@ def build_autofix_graph(
         # the agent was stuck in a loop or simply ran out of steps.
         logged = 0
         final = ""
+        # The agent's own state schema; the message tuple is what create_agent
+        # accepts at runtime and its stub does not model.
         async for state in agent.astream(
-            {"messages": [("user", user)]},
-            config={"recursion_limit": _RECURSION},
+            cast("Any", {"messages": [("user", user)]}),
+            config={"recursion_limit": _recursion_limit()},
             stream_mode="values",
         ):
             messages = state["messages"]
@@ -231,9 +242,7 @@ def build_autofix_graph(
         return final
 
     async def _ask(system: str, user: str, model: BaseChatModel | None = None) -> str:
-        resp = await (model or llm).ainvoke(
-            [("system", system + guidance_suffix), ("user", user)]
-        )
+        resp = await (model or llm).ainvoke([("system", system + guidance_suffix), ("user", user)])
         return resp.content.strip() if isinstance(resp.content, str) else str(resp.content)
 
     # ── nodes ──────────────────────────────────────────────────────────────
@@ -246,19 +255,21 @@ def build_autofix_graph(
 
     async def plan(s: AutofixState) -> dict[str, Any]:
         log.info(f"#{s['issue']} plan")
-        user = f"{_issue_context(s)}\n\n--- investigation findings ---\n{s['findings']}"
+        user = f"{_issue_context(s)}\n\n--- investigation findings ---\n{s.get('findings', '')}"
         return {"plan": await _ask(prompts.plan_prompt(s["kind"]), user)}
 
     async def implement(s: AutofixState) -> dict[str, Any]:
         runs = s.get("implement_runs", 0) + 1
         log.info(f"#{s['issue']} implement (run {runs})")
-        user = f"{_issue_context(s)}\n\n--- plan ---\n{s['plan']}"
+        user = f"{_issue_context(s)}\n\n--- plan ---\n{s.get('plan', '')}"
         if s.get("build_log"):
-            user += f"\n\n--- previous build/test FAILED, fix this ---\n{s['build_log'][:6000]}"
+            user += f"\n\n--- previous build/test FAILED, fix this ---\n{s.get('build_log', '')[:6000]}"
         if s.get("critic_feedback"):
-            user += f"\n\n--- reviewer asked for changes ---\n{s['critic_feedback']}"
+            user += f"\n\n--- reviewer asked for changes ---\n{s.get('critic_feedback', '')}"
         if s.get("security_feedback"):
-            user += f"\n\n--- security review found issues, fix them ---\n{s['security_feedback'][:6000]}"
+            user += (
+                f"\n\n--- security review found issues, fix them ---\n{s.get('security_feedback', '')[:6000]}"
+            )
         summary = await _run_agent(
             prompts.implement_prompt(s["kind"]), user, include_write=True, model=strong
         )
@@ -298,12 +309,14 @@ def build_autofix_graph(
             if res.code != 0:
                 broken.append(cmd)
                 tail = condense(res.stdout + res.stderr, VERIFY_LOG_TAIL)
-                log.warn(
+                log.warning(
                     f"#{s['issue']} baseline: `{cmd}` is ALREADY red on {s['base']} "
                     f"(exit {res.code}) — it will not gate this PR\n{tail}"
                 )
         if broken:
-            log.warn(f"#{s['issue']} baseline: {len(broken)}/{len(cfg.verify_commands)} red before any change")
+            log.warning(
+                f"#{s['issue']} baseline: {len(broken)}/{len(cfg.verify_commands)} red before any change"
+            )
         else:
             log.info(f"#{s['issue']} baseline: all {len(cfg.verify_commands)} commands green")
         return {"baseline_broken": broken}
@@ -311,7 +324,10 @@ def build_autofix_graph(
     async def verify(s: AutofixState) -> dict[str, Any]:
         skip = set(s.get("baseline_broken") or [])
         commands = [c for c in cfg.verify_commands if c not in skip]
-        log.info(f"#{s['issue']} verify: {commands}" + (f" (skipping baseline-red: {sorted(skip)})" if skip else ""))
+        log.info(
+            f"#{s['issue']} verify: {commands}"
+            + (f" (skipping baseline-red: {sorted(skip)})" if skip else "")
+        )
         logs: list[str] = []
         ok = True
         for cmd in commands:
@@ -324,7 +340,7 @@ def build_autofix_graph(
                 # tell a broken diff from a broken environment without re-running
                 # the commands by hand.
                 tail = condense(res.stdout + res.stderr, VERIFY_LOG_TAIL)
-                log.warn(f"#{s['issue']} verify FAILED: `{cmd}` exit {res.code}\n{tail}")
+                log.warning(f"#{s['issue']} verify FAILED: `{cmd}` exit {res.code}\n{tail}")
                 break  # stop at first failure; feed it back
         if ok:
             log.info(f"#{s['issue']} verify: all {len(commands)} commands green")
@@ -340,9 +356,7 @@ def build_autofix_graph(
         verdict = await _ask(prompts.diagnose_prompt(), condense(s.get("build_log", ""), 8000))
         # Unparseable → CODE: an unreadable verdict must not be what excuses the
         # agent from fixing its own diff.
-        cause = parse_verdict(
-            verdict, "CAUSE", ("CODE", "ENVIRONMENT", "FLAKY"), default="CODE"
-        )
+        cause = parse_verdict(verdict, "CAUSE", ("CODE", "ENVIRONMENT", "FLAKY"), default="CODE")
         log.info(f"#{s['issue']} diagnose: {cause}")
         retries = s.get("verify_retries", 0) + (1 if cause == "FLAKY" else 0)
         return {"failure_cause": cause, "failure_reason": verdict, "verify_retries": retries}
@@ -351,12 +365,12 @@ def build_autofix_graph(
         log.info(f"#{s['issue']} critic")
         diff = await env.shell("git diff HEAD")
         user = (
-            f"{_issue_context(s)}\n\n--- plan ---\n{s['plan']}\n\n--- diff ---\n{diff.stdout[:12000]}"
+            f"{_issue_context(s)}\n\n--- plan ---\n{s.get('plan', '')}\n\n--- diff ---\n{diff.stdout[:12000]}"
         )
         verdict = await _ask(prompts.critic_prompt(), user, model=strong)
         # Unparseable → REVISE: an unreadable review must not wave the diff through.
         approved = parse_verdict(verdict, "VERDICT", ("APPROVE", "REVISE"), default="REVISE") == "APPROVE"
-        return {"critic_feedback": "" if approved else verdict, "build_ok": s["build_ok"]}
+        return {"critic_feedback": "" if approved else verdict, "build_ok": s.get("build_ok", False)}
 
     async def security(s: AutofixState) -> dict[str, Any]:
         log.info(f"#{s['issue']} security: {cfg.security_commands}")
@@ -370,7 +384,9 @@ def build_autofix_graph(
                 scan_ok = False
                 scan_logs.append(f"$ {cmd}\nexit {res.code}\n{(res.stdout + res.stderr)[-3000:]}")
         diff = await env.shell("git diff HEAD")
-        user = f"{_issue_context(s)}\n\n--- plan ---\n{s['plan']}\n\n--- diff ---\n{diff.stdout[:12000]}"
+        user = (
+            f"{_issue_context(s)}\n\n--- plan ---\n{s.get('plan', '')}\n\n--- diff ---\n{diff.stdout[:12000]}"
+        )
         verdict = await _ask(prompts.security_prompt(), user)
         # Unparseable → FAIL. Note PASS/FAIL specifically: the reviewer's own
         # vocabulary (password, bypass) contains "PASS" as a substring.
@@ -410,7 +426,7 @@ def build_autofix_graph(
             )
         if s.get("failure_cause") in ("ENVIRONMENT", "FLAKY"):
             user += (
-                f"\n\n--- why it is red ---\nThe failure was diagnosed as {s['failure_cause']} — "
+                f"\n\n--- why it is red ---\nThe failure was diagnosed as {s.get('failure_cause', '')} — "
                 f"not something a code change fixes:\n{s.get('failure_reason', '')[:2000]}\n"
                 "Say what the environment is missing so a human can fix it."
             )
@@ -423,31 +439,42 @@ def build_autofix_graph(
         # attribution rule has to come from config rather than guidance.
         trailer = "\n\n🤖 agent-loop" if cfg.git_attribution else ""
         byline = " by agent-loop" if cfg.git_attribution else ""
-        human = "\n\n> ⚠️ CI/tests or security review were still failing locally — please review carefully." if s.get("needs_human") else ""
+        human = (
+            "\n\n> ⚠️ CI/tests or security review were still failing locally — please review carefully."
+            if s.get("needs_human")
+            else ""
+        )
 
         # ── rework: an existing PR is being amended, not a new one opened ──
         if s.get("mode") == "rework":
             pr_number, pr_url = s.get("pr_number", 0), s.get("pr_url", "")
             if not s.get("made_changes"):
-                log.warn(f"#{issue}: rework produced no changes")
+                log.warning(f"#{issue}: rework produced no changes")
                 await gh.comment_pr(
-                    repo, pr_number,
+                    repo,
+                    pr_number,
                     f"{gh.BOT_COMMENT_PREFIX}\n\nI looked at the feedback but did not find a change to make.\n\n{s.get('diff_text', '')[:2000]}",
                 )
                 return {"result": "Rework: no changes.", "pr_number": pr_number, "pr_url": pr_url}
             await gh.commit_all(repo_path, f"fix: address review feedback on #{issue}{trailer}")
             await gh.push(repo_path, s["branch"])
             await gh.comment_pr(
-                repo, pr_number,
+                repo,
+                pr_number,
                 f"{gh.BOT_COMMENT_PREFIX}\n\nPushed changes addressing the review feedback.\n\n**What changed:**\n\n{summary[:2000]}{human}",
             )
             log.info(f"#{issue}: reworked PR {pr_url}")
-            return {"result": f"Reworked PR: {pr_url}.{' Needs human review.' if human else ''}", "pr_number": pr_number, "pr_url": pr_url}
+            return {
+                "result": f"Reworked PR: {pr_url}.{' Needs human review.' if human else ''}",
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+            }
 
         if not s.get("made_changes"):
-            log.warn(f"#{issue}: no changes")
+            log.warning(f"#{issue}: no changes")
             await gh.comment_issue(
-                repo, issue,
+                repo,
+                issue,
                 f"{gh.BOT_COMMENT_PREFIX}\n\nagent-loop made no changes for this task.\n\n{s.get('diff_text', '')[:3000]}",
             )
             return {"result": f"No changes. {s.get('diff_text', '')[:500]}"}
@@ -458,9 +485,7 @@ def build_autofix_graph(
         await gh.push(repo_path, s["branch"])
 
         body = f"Automated {'feature' if kind == 'feature' else 'fix'} for issue #{issue}{byline}.\n\nCloses #{issue}\n\n---\n{summary[:3000]}{human}"
-        pr = await gh.open_pr(
-            repo_path, base=s["base"], title=title, body=body, repo=repo, head=s["branch"]
-        )
+        pr = await gh.open_pr(repo_path, base=s["base"], title=title, body=body, repo=repo, head=s["branch"])
 
         if pr.existing:
             # Adopted a PR opened by an earlier run of this issue. The push above
@@ -471,25 +496,38 @@ def build_autofix_graph(
             verb = f"Opened a PR: {pr.url}"
 
         await gh.comment_issue(
-            repo, issue,
+            repo,
+            issue,
             f"{gh.BOT_COMMENT_PREFIX}\n\n{verb}\n\n**What changed:**\n\n{summary[:2000]}{human}",
         )
         log.info(f"#{issue}: PR {pr.url}")
-        merge_note = "Waiting for green CI to auto-merge." if cfg.auto_merge else "Auto-merge is off — PR is waiting for review."
+        merge_note = (
+            "Waiting for green CI to auto-merge."
+            if cfg.auto_merge
+            else "Auto-merge is off — PR is waiting for review."
+        )
         return {"result": f"PR opened: {pr.url}. {merge_note}", "pr_number": pr.number, "pr_url": pr.url}
 
     g = StateGraph(AutofixState)
-    g.add_node("baseline", baseline)
-    g.add_node("investigate", investigate)
-    g.add_node("plan", plan)
-    g.add_node("implement", implement)
-    g.add_node("write_tests", write_tests)
-    g.add_node("verify", verify)
-    g.add_node("diagnose", diagnose)
-    g.add_node("critic", critic)
-    g.add_node("security", security)
-    g.add_node("summarize", summarize)
-    g.add_node("publish", publish)
+
+    # langgraph types a node as StateNode[NodeInputT, None], which does not
+    # accept a plain `async def (State) -> dict`. The functions below are exactly
+    # what the runtime calls; `add` is the one place that says so, instead of a
+    # pyright-ignore on every registration.
+    def add(name: str, fn: Any) -> None:
+        g.add_node(name, fn)
+
+    add("baseline", baseline)
+    add("investigate", investigate)
+    add("plan", plan)
+    add("implement", implement)
+    add("write_tests", write_tests)
+    add("verify", verify)
+    add("diagnose", diagnose)
+    add("critic", critic)
+    add("security", security)
+    add("summarize", summarize)
+    add("publish", publish)
 
     # baseline runs first, on the untouched checkout — it is only meaningful
     # before implement has written anything, and rework needs it just as much.
@@ -514,7 +552,7 @@ def build_autofix_graph(
             or bool(s.get("baseline_broken"))
         }
 
-    g.add_node("mark", set_needs_human)
+    add("mark", set_needs_human)
     g.add_edge("summarize", "mark")
     g.add_edge("mark", "publish")
     g.add_edge("publish", END)

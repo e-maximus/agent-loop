@@ -20,9 +20,11 @@ Short guide for opening a pull request in this repo. For the full working guide
   ```bash
   .venv/bin/python -m pytest -q
   ```
-- Decide whether this PR should deploy. Merging alone does not: the release
-  watcher ships when `version` in `pyproject.toml` changes. Bump it in this PR
-  if the change is worth rolling out to the machine, leave it if not.
+- **Do not touch `version` in `pyproject.toml`** — the merge bumps it, and CI
+  fails a PR that edits the line. Set the *level* with a label instead:
+  `release:minor` or `release:major`, or nothing at all for a patch. The
+  criteria are in [AGENTS.md](AGENTS.md#versioning--releases). Every merge
+  releases, patch included, so merging a PR ships it.
 
 ## PR description
 
@@ -35,7 +37,8 @@ Every PR description **must** contain these three sections:
 
 Add any of these **only when they carry weight** — skip the rest:
 
-- Deploys / version bump (say so explicitly when you bumped it, and why)
+- Deploys / release level (say so when you added `release:minor` or
+  `release:major`, and why)
 - How to test (manual steps, especially for anything touching a live repo)
 - Breaking changes to `.env` or `agent-loop.config.yaml`, and the migration
 - Related issues (`Closes #N`)

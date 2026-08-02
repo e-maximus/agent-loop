@@ -57,9 +57,7 @@ class FakeLLM:
 
 
 def make_graph(env, llm=None, **cfg_kw):
-    cfg = GithubSourceConfig(
-        type="github", id="t", repo="o/r", verifyCommands=[LINT, E2E], **cfg_kw
-    )
+    cfg = GithubSourceConfig(type="github", id="t", repo="o/r", verifyCommands=[LINT, E2E], **cfg_kw)
     return build_autofix_graph(llm or FakeLLM(""), env, cfg)
 
 
@@ -121,7 +119,9 @@ async def test_a_skipped_suite_flags_the_pr_for_a_human():
 # ── guard 2: baseline off — diagnosis has to catch it ──────────────────────
 async def test_without_baseline_the_missing_key_is_diagnosed_as_environment():
     env = FakeEnv(red_when=lambda c: c == E2E)
-    graph = make_graph(env, FakeLLM("CAUSE: ENVIRONMENT\nno Clerk key in the container"), baselineVerify=False)
+    graph = make_graph(
+        env, FakeLLM("CAUSE: ENVIRONMENT\nno Clerk key in the container"), baselineVerify=False
+    )
 
     assert await node(graph, "baseline").ainvoke(state()) == {"baseline_broken": []}
 

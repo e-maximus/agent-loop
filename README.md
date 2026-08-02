@@ -157,13 +157,19 @@ the CI roll-up, the task lifecycle/dedup queries, the queue guard, and the
 intake gate.
 
 ```bash
-.venv/bin/pip install -e ".[dev]"   # pytest + pytest-asyncio
+.venv/bin/pip install -e ".[dev]"   # pytest, ruff, pyright
 .venv/bin/python -m pytest
 ```
 
+`constraints.txt` pins the exact dependency set the deployed machine runs; add
+`-c constraints.txt` to the install to reproduce it exactly. CI runs four checks —
+`ruff check`, `ruff format --check`, `pyright`, `pytest`.
+
 Changing this repo? [AGENTS.md](AGENTS.md) is the working guide — project shape,
-the two boundaries that keep an unattended runner safe, and why a merge does not
-deploy but a version bump does. [CONTRIBUTORS.md](CONTRIBUTORS.md) covers PRs.
+the two boundaries that keep an unattended runner safe, and how a merge turns
+into a release. [CODE_STANDARDS.md](CODE_STANDARDS.md) is what
+the code itself has to look like, and [SECURITY.md](SECURITY.md) states the trust
+model. [CONTRIBUTORS.md](CONTRIBUTORS.md) covers PRs.
 
 ## The model
 
@@ -211,7 +217,10 @@ tasks are re-queued on boot — an interruption is not a failure — and
 CI (`scripts/install-hooks.sh` installs a pre-push hook that says so before the
 round-trip). Because `main` also carries ordinary work, **a release is a version
 bump** — [release-watch.sh](scripts/release-watch.sh) deploys when `version` in
-`pyproject.toml` differs from what is deployed, not on every commit.
+`pyproject.toml` differs from what is deployed, not on every commit. Nobody
+edits that line by hand: merging a PR bumps it
+([auto-release.yml](.github/workflows/auto-release.yml)), sized by the PR's
+`release:minor` / `release:major` label, patch by default.
 
 Pull-based by design: the machine is behind NAT and the repo is public, so a
 self-hosted Actions runner would be both unreachable and a way for any PR author

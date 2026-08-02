@@ -6,6 +6,12 @@ pydantic-settings. The list of sources lives in a YAML file; secrets there are
 referenced as ${VAR} and resolved from the same environment, so nothing secret
 is committed to the YAML. Telegram has been removed — the only source type is
 `github`.
+
+Nothing here runs at import time. `get_settings()` reads `.env` on first call and
+caches; `require_api_key()` is the explicit validation the entry point calls.
+Importing a module must never terminate the process or touch the filesystem —
+that is what forced tests to set environment variables before their imports, and
+it makes any second consumer of this package unusable.
 """
 
 from __future__ import annotations
@@ -13,6 +19,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -20,8 +27,6 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field, ValidationError, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
-
-load_dotenv()
 
 
 # ── Global env ────────────────────────────────────────────────────────────
@@ -47,14 +52,28 @@ class Settings(BaseSettings):
     agent_loop_config: str = Field(default="./agent-loop.config.yaml", alias="AGENT_LOOP_CONFIG")
 
 
-settings = Settings()
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """The process-wide settings, read once. `.env` is loaded here rather than at
+    import so that importing agent_loop has no side effects."""
+    load_dotenv()
+    return Settings()
 
-DB_PATH = Path(settings.db_path).resolve()
-CONFIG_PATH = Path(settings.agent_loop_config).resolve()
 
-if not settings.deepseek_api_key:
-    print("\n✖ DEEPSEEK_API_KEY is empty. Set it in .env.\n", file=sys.stderr)
-    sys.exit(1)
+def db_path() -> Path:
+    return Path(get_settings().db_path).resolve()
+
+
+def config_path() -> Path:
+    return Path(get_settings().agent_loop_config).resolve()
+
+
+def require_api_key() -> None:
+    """Called by the entry point: refuse to start without the model credential.
+    A missing key is a startup error, not an import error."""
+    if not get_settings().deepseek_api_key:
+        print("\n✖ DEEPSEEK_API_KEY is empty. Set it in .env.\n", file=sys.stderr)
+        sys.exit(1)
 
 
 # ── Per-source config (validated after YAML parse + ${VAR} expansion) ──────
@@ -136,6 +155,7 @@ def _expand_env_refs(value: Any) -> Any:
     """Replace every ${VAR} in string values with os.environ[VAR]; raise if a
     referenced variable is unset, so misconfigured secrets fail loudly."""
     if isinstance(value, str):
+
         def repl(m: re.Match[str]) -> str:
             name = m.group(1)
             v = os.environ.get(name)
@@ -153,30 +173,31 @@ def _expand_env_refs(value: Any) -> Any:
 
 def load_sources() -> list[GithubSourceConfig]:
     """Load, expand, and validate the YAML source definitions. Exits on error."""
-    if not CONFIG_PATH.exists():
+    path = config_path()
+    if not path.exists():
         print(
-            f"\n✖ Config file not found: {CONFIG_PATH}\n"
+            f"\n✖ Config file not found: {path}\n"
             "  Create it (see agent-loop.config.example.yaml) or set AGENT_LOOP_CONFIG.\n",
             file=sys.stderr,
         )
         sys.exit(1)
 
     try:
-        doc = _expand_env_refs(yaml.safe_load(CONFIG_PATH.read_text()))
-    except Exception as err:
-        print(f"\n✖ Failed to load {CONFIG_PATH}: {err}\n", file=sys.stderr)
+        doc = _expand_env_refs(yaml.safe_load(path.read_text()))
+    except Exception as err:  # noqa: BLE001 — any parse failure is reported, then fatal
+        print(f"\n✖ Failed to load {path}: {err}\n", file=sys.stderr)
         sys.exit(1)
 
     raw_sources = (doc or {}).get("sources")
     if not raw_sources:
-        print(f"\n✖ {CONFIG_PATH}: config must define at least one source under `sources`.\n", file=sys.stderr)
+        print(f"\n✖ {path}: config must define at least one source under `sources`.\n", file=sys.stderr)
         sys.exit(1)
 
     sources: list[GithubSourceConfig] = []
     for i, entry in enumerate(raw_sources):
         if entry.get("type") != "github":
             print(
-                f"\n✖ {CONFIG_PATH}: sources[{i}].type={entry.get('type')!r} is not supported "
+                f"\n✖ {path}: sources[{i}].type={entry.get('type')!r} is not supported "
                 "(only `github`; telegram was removed).\n",
                 file=sys.stderr,
             )
@@ -184,13 +205,13 @@ def load_sources() -> list[GithubSourceConfig]:
         try:
             sources.append(GithubSourceConfig.model_validate(entry))
         except ValidationError as err:
-            print(f"\n✖ Invalid {CONFIG_PATH} sources[{i}]:\n{err}\n", file=sys.stderr)
+            print(f"\n✖ Invalid {path} sources[{i}]:\n{err}\n", file=sys.stderr)
             sys.exit(1)
 
     ids = [s.id for s in sources]
     dup = next((x for x in ids if ids.count(x) > 1), None)
     if dup:
-        print(f"\n✖ Duplicate source id {dup!r} in {CONFIG_PATH} — ids must be unique.\n", file=sys.stderr)
+        print(f"\n✖ Duplicate source id {dup!r} in {path} — ids must be unique.\n", file=sys.stderr)
         sys.exit(1)
 
     return sources
