@@ -28,11 +28,15 @@ from .answer_graph import build_answer_graph, render_thread
 from .autofix_graph import AutofixState, build_autofix_graph
 from .gh import (
     BOT_COMMENT_PREFIX,
+    PullRequest,
     checkout_existing_branch,
+    close_pr,
     comment_issue,
     comment_pr,
+    continue_branch,
     default_branch,
     ensure_clone,
+    find_open_pr,
     is_authenticated,
     is_bot_comment,
     issue_author_association,
@@ -175,6 +179,43 @@ class GithubSource:
         allowed = parse_verdict(text, "VERDICT", ("ALLOW", "REJECT"), default="REJECT") == "ALLOW"
         return allowed, text
 
+    async def _prepare_first_pass(
+        self, repo: str, issue: int, repo_path: str, base: str, branch: str
+    ) -> PullRequest | None:
+        """Put the checkout on `branch` for a first pass, and say whether that
+        branch already carries an open PR this run is continuing.
+
+        An issue reaching a first pass with a PR already open is normal, not an
+        anomaly: the task DB is local and can be reset, a run that failed at
+        publish leaves its PR behind, and a human can requeue one. Resetting the
+        branch onto base would throw away work that may already have been
+        reviewed and force-push out from under comments anchored to it — so
+        continue that branch when it can still be brought up to date with base,
+        and close the PR (saying why, in its thread) only when it cannot.
+
+        A PR whose head is in a fork is never ours to continue or to close: treat
+        it as absent and work on our own branch.
+        """
+        pr = await find_open_pr(repo, branch)
+        if pr is None or pr.cross_repository:
+            await prepare_branch(repo_path, branch)
+            return None
+
+        if await continue_branch(repo_path, branch, base):
+            log.info(f"#{issue}: continuing the open PR {pr.url} on {branch}")
+            return pr
+
+        log.warning(f"#{issue}: {pr.url} cannot be continued — closing it and starting over")
+        await close_pr(
+            repo,
+            pr.number,
+            f"{BOT_COMMENT_PREFIX}\n\nClosing this PR: its branch is gone from the remote or no "
+            f"longer merges cleanly into `{base}`, so the new work on #{issue} cannot build on "
+            f"it. Starting over from `{base}` in a fresh PR.",
+        )
+        await prepare_branch(repo_path, branch)
+        return None
+
     async def _autofix(self, task: TaskRow, meta: TaskMeta) -> str | None:
         repo, issue, kind = meta["repo"], meta["issue"], meta["kind"]
         mode = meta.get("mode", "")
@@ -197,10 +238,11 @@ class GithubSource:
         repo_path = await ensure_clone(repo, self.cfg.clone_dir)
         base = await default_branch(repo)
         branch = meta.get("branch") or issue_branch(issue)
+        continued: PullRequest | None = None
         if mode == "rework":
             await checkout_existing_branch(repo_path, branch)
         else:
-            await prepare_branch(repo_path, branch)
+            continued = await self._prepare_first_pass(repo, issue, repo_path, base, branch)
 
         guidance = read_repo_guidance(repo_path)
         if guidance:
@@ -217,6 +259,11 @@ class GithubSource:
             "branch": branch,
             "repo_path": repo_path,
         }
+        if continued is not None:
+            # A first pass on top of an open PR: the full pipeline still runs
+            # (there is no review feedback to re-enter at `implement` with), but
+            # publish pushes onto that PR instead of opening a second one.
+            state.update(pr_number=continued.number, pr_url=continued.url)
         if mode == "rework":
             feedback = meta.get("feedback", "")
             state.update(
