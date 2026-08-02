@@ -63,6 +63,9 @@ class PullRequest:
     # True when open_pr adopted a PR that already existed for the branch rather
     # than creating one — the caller updates its body instead of leaving stale text.
     existing: bool = False
+    # True when the head branch lives in a fork. We never push to it and never
+    # close it: it is somebody else's branch that happens to share our name.
+    cross_repository: bool = False
 
 
 async def _git(args: list[str], *, cwd: str, throw_on_error: bool = True):
@@ -192,6 +195,42 @@ async def checkout_existing_branch(repo_path: str, branch: str) -> None:
     await _git(["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
 
 
+async def continue_branch(repo_path: str, branch: str, base: str) -> bool:
+    """Put the checkout on an existing PR branch, brought up to date with base.
+
+    Used when an issue already has an open PR: the work on that branch is worth
+    building on rather than overwriting, but a branch that forked off weeks of
+    base commits ago is not something the agent can verify honestly — so base is
+    merged in first, here, deterministically.
+
+    Returns False when the branch cannot be continued (it is gone from origin, or
+    merging base conflicts). Merge conflicts are resolved by a human or by
+    starting over; guessing at them unattended is how a PR quietly loses someone
+    else's commit. On False the checkout is left untouched for the caller to
+    reset, and a half-finished merge is always aborted.
+    """
+    fetched = await run("git", ["fetch", "origin", branch], cwd=repo_path, throw_on_error=False)
+    if fetched.code != 0:
+        log.info(f"branch {branch} is gone from origin — cannot continue it")
+        return False
+    await run("git", ["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
+
+    # `core.hooksPath=/dev/null`: this merge runs on the host, with credentials,
+    # in a checkout the agent has been writing to — a `post-merge` hook left
+    # there must not execute as us.
+    merged = await run(
+        "git",
+        ["-c", "core.hooksPath=/dev/null", "merge", "--no-edit", f"origin/{base}"],
+        cwd=repo_path,
+        throw_on_error=False,
+    )
+    if merged.code != 0:
+        await run("git", ["merge", "--abort"], cwd=repo_path, throw_on_error=False)
+        log.info(f"branch {branch} conflicts with {base} — cannot continue it")
+        return False
+    return True
+
+
 async def has_changes(repo_path: str) -> bool:
     res = await _git(["status", "--porcelain"], cwd=repo_path)
     return len(res.stdout.strip()) > 0
@@ -212,7 +251,18 @@ async def find_open_pr(repo: str, branch: str) -> PullRequest | None:
     the DB can be reset or lost, the PR cannot."""
     res = await run(
         "gh",
-        ["pr", "list", "--repo", repo, "--head", branch, "--state", "open", "--json", "number,url"],
+        [
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            branch,
+            "--state",
+            "open",
+            "--json",
+            "number,url,isCrossRepository",
+        ],
         throw_on_error=False,
     )
     if res.code != 0:
@@ -223,7 +273,11 @@ async def find_open_pr(repo: str, branch: str) -> PullRequest | None:
         return None
     for it in items:
         if it.get("url"):
-            return PullRequest(number=int(it.get("number") or 0), url=it["url"])
+            return PullRequest(
+                number=int(it.get("number") or 0),
+                url=it["url"],
+                cross_repository=bool(it.get("isCrossRepository")),
+            )
     return None
 
 
@@ -252,6 +306,17 @@ async def open_pr(
             return PullRequest(number=existing.number, url=existing.url, existing=True)
     detail = (res.stderr or res.stdout).strip()
     raise RuntimeError(f"`gh pr create` failed (exit {res.code}):\n{detail}")
+
+
+async def close_pr(repo: str, pr_number: int, comment: str) -> None:
+    """Close a PR of ours that can no longer be continued, saying why in the
+    thread. The branch is left alone: the next run force-pushes over it, and
+    deleting it here would strip the closed PR of its diff."""
+    await run(
+        "gh",
+        ["pr", "close", str(pr_number), "--repo", repo, "--comment", comment],
+        throw_on_error=False,
+    )
 
 
 async def update_pr(repo: str, pr_number: int, *, title: str, body: str) -> None:

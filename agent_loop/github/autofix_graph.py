@@ -23,6 +23,11 @@ in the source runner, not here. In `rework` mode the graph re-enters at
 `implement` to amend an existing PR. Publish (git/gh) also runs on the host but
 is modelled as the terminal node.
 
+A first pass may also arrive with `pr_number` set: prepare found an open PR for
+the issue and started from its branch instead of resetting onto base. The whole
+pipeline still runs — there is no review feedback to short-circuit with — and
+`publish` pushes onto that PR rather than opening a second one for the issue.
+
 The agent-heavy nodes (investigate/implement/write_tests) use create_agent
 with the tools from tools.py; plan/critic/summarize are single LLM calls; verify
 is deterministic (runs the configured commands, exit code decides).
@@ -131,6 +136,9 @@ class AutofixState(_AutofixInput, total=False):
     security_feedback: str
     needs_human: bool
     pr_summary: str
+    # The PR this run works on. Set before the graph starts in `rework`, and on a
+    # first pass that continues an already-open PR for the issue; otherwise it is
+    # what `publish` returns after opening one.
     pr_number: int
     pr_url: str
     result: str  # final human-readable outcome
@@ -470,8 +478,25 @@ def build_autofix_graph(
                 "pr_url": pr_url,
             }
 
+        # Set on a first pass that is continuing an already-open PR for this
+        # issue (see GithubSource._prepare_first_pass), 0 when opening a new one.
+        continued_pr, continued_url = s.get("pr_number", 0), s.get("pr_url", "")
+
         if not s.get("made_changes"):
             log.warning(f"#{issue}: no changes")
+            if continued_pr:
+                # The branch already carried the work, so the report belongs on
+                # the PR — and the PR is still ours to watch, so hand it back.
+                await gh.comment_pr(
+                    repo,
+                    continued_pr,
+                    f"{gh.BOT_COMMENT_PREFIX}\n\nI picked this PR up again for #{issue} and found nothing to add to it.\n\n{s.get('diff_text', '')[:2000]}",
+                )
+                return {
+                    "result": f"No changes; {continued_url} already carries the work.",
+                    "pr_number": continued_pr,
+                    "pr_url": continued_url,
+                }
             await gh.comment_issue(
                 repo,
                 issue,
@@ -485,6 +510,25 @@ def build_autofix_graph(
         await gh.push(repo_path, s["branch"])
 
         body = f"Automated {'feature' if kind == 'feature' else 'fix'} for issue #{issue}{byline}.\n\nCloses #{issue}\n\n---\n{summary[:3000]}{human}"
+
+        if continued_pr:
+            # We started from this PR's branch and just pushed on top of it, so
+            # there is no PR to open — refresh its description to describe the
+            # work as it now stands, and report in the thread a reviewer is
+            # already subscribed to.
+            await gh.update_pr(repo, continued_pr, title=title, body=body)
+            await gh.comment_pr(
+                repo,
+                continued_pr,
+                f"{gh.BOT_COMMENT_PREFIX}\n\nPicked this PR up again for #{issue} and pushed more work onto it.\n\n**What changed:**\n\n{summary[:2000]}{human}",
+            )
+            log.info(f"#{issue}: continued PR {continued_url}")
+            return {
+                "result": f"Continued the open PR: {continued_url}.{' Needs human review.' if human else ''}",
+                "pr_number": continued_pr,
+                "pr_url": continued_url,
+            }
+
         pr = await gh.open_pr(repo_path, base=s["base"], title=title, body=body, repo=repo, head=s["branch"])
 
         if pr.existing:
