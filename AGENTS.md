@@ -101,6 +101,23 @@ prompts, and anything the agent posts to GitHub.
 5. **If you changed a dependency**, regenerate `constraints.txt` in the same PR —
    that file, not `pyproject.toml`, is what the machine installs.
 
+## The backlog
+
+`BACKLOG.md` at the repo root is the parking lot for improvements nobody has
+built yet — one entry per idea, with type, priority, effort and the reasoning
+behind it. It is **untracked** (`.gitignore`) and local to this machine, so it
+carries what git history cannot: what was considered and why, across sessions
+that share no context.
+
+- **Read it before proposing improvements.** An idea that is already parked with
+  a written rationale — or a written argument against it — does not need
+  rediscovering.
+- **Add to it when you find work worth doing but out of scope.** Noticing a gap
+  mid-task is not a reason to widen the task; it is a reason to write the entry.
+  Follow the format at the top of the file, and say *why*, not just *what*.
+- **Delete the entry in the PR that ships it.** A shipped idea left in the file
+  reads as an open one next session, and there is no history to check it against.
+
 ## Branching & PRs
 
 - **Start every task from a fresh `main`**: `git checkout main`, `git pull origin
