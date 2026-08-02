@@ -46,6 +46,15 @@ jobs:
       # Fully mocked — no network, LLM, or Docker.
       - name: Tests
         run: pytest -q --cov --cov-report=term-missing
+      # Catches an import-time break (a bad module-level statement, a circular
+      # import) that the mocked suite can miss. Needs the env vars config.py
+      # validates at import, and a config path it will not try to read.
+      - name: Smoke import
+        env:
+          DEEPSEEK_API_KEY: ci-smoke-test
+          AGENT_LOOP_CONFIG: /dev/null
+          DB_PATH: ${{ runner.temp }}/smoke.db
+        run: python -c "import agent_loop.main"
 
   # The release bump belongs to auto-release.yml, which applies it on main after
   # the merge. A PR that edits the line itself is how every other open PR gets a
