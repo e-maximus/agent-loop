@@ -95,20 +95,30 @@ async def test_a_fork_pr_is_left_alone(monkeypatch):
 
 
 # ── continue_branch: when a branch can be built on ─────────────────────────
-def stub_git(monkeypatch, codes):
-    """Fake git; `codes` maps a subcommand to its exit code (default 0). Records
-    each invocation with `-c` config flags stripped, so a test asserts on the
-    command rather than on how it was hardened."""
+CLEAN_CONFIG_Z = "core.bare\nfalse\0remote.origin.url\nhttps://github.com/o/r.git\0"
+
+
+def stub_git(monkeypatch, codes, *, envs: list | None = None):
+    """Fake git; `codes` maps a subcommand to its exit code (default 0).
+
+    Also stubs the config read `_git` now does before every call — otherwise
+    these tests would shell out to a real git in a directory that does not
+    exist, which is the kind of accidental unmocking the suite exists to avoid.
+    """
     ran: list[list[str]] = []
 
-    async def _run(cmd, args, *, cwd=None, throw_on_error=True):
+    async def _run(cmd, args, *, cwd=None, env=None, throw_on_error=True):
         assert cmd == "git"
-        while args and args[0] == "-c":
-            args = args[2:]
         ran.append(args)
+        if envs is not None:
+            envs.append(env)
         return SimpleNamespace(code=codes.get(args[0], 0), stdout="", stderr="")
 
+    async def _config_run(cmd, args, **kwargs):
+        return SimpleNamespace(code=0, stdout=CLEAN_CONFIG_Z, stderr="")
+
     monkeypatch.setattr(gh, "run", _run)
+    monkeypatch.setattr("agent_loop.git_integrity.run", _config_run)
     return ran
 
 
@@ -136,19 +146,25 @@ async def test_continue_branch_aborts_a_conflicting_merge(monkeypatch):
     assert ran[-1] == ["merge", "--abort"]
 
 
-async def test_the_merge_cannot_run_hooks_from_the_checkout(monkeypatch):
-    # The agent writes into this checkout; a post-merge hook there would run on
-    # the host, with credentials.
-    seen: list[list[str]] = []
+async def test_every_call_here_is_hardened_not_just_the_merge(monkeypatch):
+    """The agent writes into this checkout, and these three commands run on the
+    host with credentials. The merge used to be the only one carrying the hook
+    flag, so a `post-checkout` planted by an earlier task on the same checkout
+    executed on the `checkout -B` two lines above it. Assert on all of them."""
+    envs: list[dict | None] = []
+    ran = stub_git(monkeypatch, {}, envs=envs)
 
-    async def _run(cmd, args, *, cwd=None, throw_on_error=True):
-        seen.append(args)
-        return SimpleNamespace(code=0, stdout="", stderr="")
-
-    monkeypatch.setattr(gh, "run", _run)
     await gh.continue_branch("/repo", "issue-84", "main")
-    merge = next(a for a in seen if "merge" in a)
-    assert merge[:3] == ["-c", "core.hooksPath=/dev/null", "merge"]
+
+    assert [a[0] for a in ran] == ["fetch", "checkout", "merge"]
+    for env in envs:
+        assert env is not None
+        pairs = {
+            env[f"GIT_CONFIG_KEY_{i}"]: env[f"GIT_CONFIG_VALUE_{i}"]
+            for i in range(int(env["GIT_CONFIG_COUNT"]))
+        }
+        assert pairs["core.hooksPath"] == "/dev/null"
+        assert pairs["core.fsmonitor"] == "false"
 
 
 # ── publish: pushes onto the PR it was handed ──────────────────────────────

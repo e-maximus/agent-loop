@@ -9,7 +9,8 @@ that genuinely needs credentials (`gh`, `git`) keeps them.
 
 from __future__ import annotations
 
-from agent_loop.container import ExecEnv
+from agent_loop.config import ContainerConfig
+from agent_loop.container import ExecEnv, task_container
 from agent_loop.exec import agent_env
 
 
@@ -66,6 +67,28 @@ async def test_host_shell_runs_with_the_scrubbed_environment(monkeypatch):
 
     assert seen["inherit_env"] is False
     assert "DEEPSEEK_API_KEY" not in seen["env"]
+
+
+async def test_the_container_gets_git_read_only(monkeypatch):
+    """The path-gate does not cover the container's shell, and a writable `.git`
+    in the mount is host code execution: the agent writes a command into
+    `.git/config`, and the next host-side `git status` — `has_changes`, in the
+    same task — runs it. Read-only keeps `git diff HEAD`, which critic, security
+    and summarize all run inside the container, working."""
+    seen = {}
+
+    async def fake_run(cmd, args, **kwargs):
+        seen.setdefault("calls", []).append((cmd, args))
+        return type("R", (), {"stdout": "cid123", "stderr": "", "code": 0})()
+
+    monkeypatch.setattr("agent_loop.container.run", fake_run)
+    async with task_container("/repo", ContainerConfig(image="img")):
+        pass
+
+    run_args = next(args for cmd, args in seen["calls"] if args[:1] == ["run"])
+    mounts = [run_args[i + 1] for i, a in enumerate(run_args) if a == "--mount"]
+    assert "type=bind,src=/repo,dst=/workspace" in mounts
+    assert "type=bind,src=/repo/.git,dst=/workspace/.git,readonly" in mounts
 
 
 async def test_container_mode_does_not_forward_the_host_environment(monkeypatch):

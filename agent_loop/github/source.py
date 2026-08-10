@@ -10,6 +10,7 @@ environment (host or Docker container). Prepare (clone/branch) and publish
 from __future__ import annotations
 
 import os
+import shutil
 from pathlib import Path
 from typing import cast
 
@@ -20,6 +21,7 @@ from langgraph.errors import GraphRecursionError
 from ..config import GithubSourceConfig, get_settings
 from ..container import task_container
 from ..db import TaskMeta, TaskRow, tasks
+from ..git_integrity import GitControlTampered
 from ..logging import create_logger, task_log_scope
 from ..queue import Queue
 from ..version import trace_config
@@ -126,7 +128,19 @@ class GithubSource:
         repo, issue, kind = meta.get("repo"), meta.get("issue"), meta.get("kind")
         if not repo or not issue or kind == "question":
             return
-        if isinstance(err, GraphRecursionError):
+        if isinstance(err, GitControlTampered):
+            # The checkout is reused for every task on this repo, so reporting a
+            # poisoned one and leaving it in place hands it to the next task.
+            # Removing it makes the next run clone fresh, which is the repair.
+            shutil.rmtree(err.repo_path, ignore_errors=True)
+            log.error(f"#{issue}: git config tampered — checkout {err.repo_path} removed")
+            reason = (
+                "the checkout's git config carried entries agent-loop did not put there "
+                f"({'; '.join(err.findings)}). Git executes commands named in its own "
+                "config, so the task was stopped before any git command ran and the "
+                "checkout was discarded. This is worth looking at by hand."
+            )
+        elif isinstance(err, GraphRecursionError):
             reason = (
                 f"the agent hit its step budget ({get_settings().agent_max_turns} turns) "
                 "without finishing — it may be stuck in a loop or the task may be "

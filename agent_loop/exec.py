@@ -3,12 +3,14 @@
 Task input (issue text, prompts) flows into git/gh arguments, so we never pass
 it through a shell where it could be reinterpreted.
 
-Two environments, deliberately not one. `run()` inherits the process
+Three environments, deliberately not one. `run()` inherits the process
 environment, because `gh` and `git` need the credentials that are in it.
 `agent_env()` returns a scrubbed copy for commands the *agent* chose to run: on
 a source with no container, those run as `bash -lc` on the host, and inheriting
 the process environment would put DEEPSEEK_API_KEY and the GitHub token one
 `env` call away from a model steered by attacker-controlled issue text.
+`git_env()` is the third: the credentials stay, but the checkout is not allowed
+to tell git which commands to run.
 """
 
 from __future__ import annotations
@@ -49,6 +51,39 @@ _AGENT_ENV_ALLOWLIST = frozenset(
         "CI",
     }
 )
+
+
+# Config git must not take from the checkout, expressed as environment rather
+# than as `-c` flags. `-c` only reaches the git process we start ourselves; `gh`
+# shells out to git for clone, push and `pr create`, and those children inherit
+# the environment but not our command line. GIT_CONFIG_* has the same precedence
+# as `-c` (verified: it overrides a repo-local value), so this is the only form
+# that covers both.
+#
+# This layer is defence in depth, not the guarantee: it names keys, and the set
+# of config keys that execute a command is open-ended. git_integrity.py is what
+# actually holds, by allowlisting the keys that may be present at all.
+_GIT_HARDENING: tuple[tuple[str, str], ...] = (
+    # A hook left in the checkout — by the agent, or by whoever pushed to the
+    # repo — must not run as us.
+    ("core.hooksPath", "/dev/null"),
+    # Executed on every index refresh, i.e. on `git status`, `add` and `commit`.
+    ("core.fsmonitor", "false"),
+    # `ext::sh -c …` is a remote URL that executes.
+    ("protocol.ext.allow", "never"),
+)
+
+
+def git_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+    """Environment overlay for a git or gh call: the hardening above, plus
+    whatever the caller adds. Applied on top of the process environment, which
+    these calls still need — they are the ones that carry credentials."""
+    env: dict[str, str] = {"GIT_CONFIG_COUNT": str(len(_GIT_HARDENING))}
+    for i, (key, value) in enumerate(_GIT_HARDENING):
+        env[f"GIT_CONFIG_KEY_{i}"] = key
+        env[f"GIT_CONFIG_VALUE_{i}"] = value
+    env.update(extra or {})
+    return env
 
 
 def agent_env(extra: dict[str, str] | None = None) -> dict[str, str]:

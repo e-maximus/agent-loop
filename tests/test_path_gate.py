@@ -62,13 +62,39 @@ def test_paths_inside_the_checkout_resolve(repo: Path):
 
 
 # ── .git/ is inside the checkout but outside the gate ─────────────────────
-@pytest.mark.parametrize("path", [".git/hooks/pre-commit", ".git/config", ".git"])
+@pytest.mark.parametrize(
+    "path",
+    [
+        ".git/hooks/pre-commit",
+        ".git/config",
+        ".git",
+        # The deploy target is macOS, where APFS is case-insensitive by default
+        # and `realpath` does not normalise case: these all land in `.git/`.
+        ".GIT/config",
+        ".Git/hooks/pre-commit",
+        ".gIt/config",
+        "src/../.GIT/config",
+    ],
+)
 def test_the_git_directory_is_refused(repo: Path, path: str):
     """Publishing runs `git commit` on the host even when the agent's shell is
-    containerised, and git runs .git/hooks/ when it does. A writable .git/ is
-    host code execution, not a file write."""
+    containerised, and git executes whatever its own config names when it does.
+    A writable .git/ is host code execution, not a file write."""
     with pytest.raises(PathEscape):
         _resolve_in(str(repo), path)
+
+
+async def test_write_cannot_plant_a_git_config_by_changing_the_case(repo: Path):
+    """On a case-insensitive filesystem `.GIT/config` IS `.git/config`, so a
+    `core.fsmonitor` written here would execute on the next host-side git call."""
+    result = await tools(repo)["Write"].ainvoke(
+        {"file_path": ".GIT/config", "content": "[core]\n\tfsmonitor = ./evil.sh\n"}
+    )
+    assert "Error running Write" in result
+    # Asserting `.GIT` does not exist would be meaningless here: on a
+    # case-insensitive filesystem it "exists" because `.git` does. What matters
+    # is that no config file was created under either spelling.
+    assert not (repo / ".git" / "config").exists()
 
 
 async def test_write_cannot_plant_a_git_hook(repo: Path):
