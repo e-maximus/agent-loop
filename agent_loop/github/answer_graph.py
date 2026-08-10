@@ -64,7 +64,7 @@ def build_answer_graph(
     *,
     auto_post: bool = True,
 ):
-    guidance_suffix = f"\n\n{guidance}" if guidance else ""
+    guidance_suffix = f"\n\n{prompts.wrap_untrusted('REPOSITORY INSTRUCTIONS', guidance)}" if guidance else ""
 
     async def answer(s: AnswerState) -> dict[str, Any]:
         log.info(f"#{s['issue']} answer")
@@ -74,9 +74,10 @@ def build_answer_graph(
             tools,
             system_prompt=prompts.answer_prompt(cfg.labels.bug, cfg.labels.feature) + guidance_suffix,
         )
+        thread = f"Title: {s['title']}\n\n{s.get('body') or '(no body)'}{s.get('thread', '')}"
         user = (
-            f"Answer this GitHub issue (a question).\n\nTitle: {s['title']}\n\n"
-            f"{s.get('body') or '(no body)'}{s.get('thread', '')}\n\nIssue: {s['url']}"
+            "Answer this GitHub issue (a question).\n\n"
+            f"{prompts.wrap_untrusted('ISSUE THREAD', thread)}\n\nIssue: {s['url']}"
         )
         result = await agent.ainvoke(
             cast("Any", {"messages": [("user", user)]}),

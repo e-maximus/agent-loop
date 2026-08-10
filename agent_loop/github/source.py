@@ -59,7 +59,14 @@ def read_repo_guidance(repo_path: str) -> str:
     """Read AGENTS.md / CLAUDE.md from the checkout root so the agent always sees
     the repo's own project instructions before starting. Returns a formatted
     block (or '' if none). AGENTS.md is the primary convention; CLAUDE.md is
-    included too when present."""
+    included too when present.
+
+    The block is fenced as untrusted by its callers, and it is deliberately no
+    longer labelled "read and follow these": this is a file from the repository
+    under work, which the trust model calls attacker-controlled. It tells the
+    agent how the project writes code; it does not get to tell a reviewer what
+    to conclude, so the nodes that judge (critic, security, diagnose) are not
+    given it at all."""
     blocks: list[str] = []
     for name in ("AGENTS.md", "CLAUDE.md"):
         try:
@@ -67,10 +74,7 @@ def read_repo_guidance(repo_path: str) -> str:
         except OSError:
             continue
         if text:
-            blocks.append(
-                f"--- {name} (repository instructions — read and follow these) ---\n"
-                f"{text[:_GUIDANCE_MAX_CHARS]}"
-            )
+            blocks.append(f"--- {name} ---\n{text[:_GUIDANCE_MAX_CHARS]}")
     return "\n\n".join(blocks)
 
 
@@ -165,9 +169,10 @@ class GithubSource:
         repo, issue = meta["repo"], meta["issue"]
         assoc = meta.get("authorAssociation") or await issue_author_association(repo, issue)
         author = meta.get("author", "unknown")
+        body = f"Title: {task.prompt}\n\n{meta.get('body') or '(no body)'}"
         user = (
             f"Issue #{issue} in {repo}\nAuthor: {author} (authorAssociation: {assoc})\n\n"
-            f"Title: {task.prompt}\n\n{meta.get('body') or '(no body)'}"
+            f"{prompts.wrap_untrusted('ISSUE TEXT', body)}"
         )
         resp = await self.llm.ainvoke(
             [("system", prompts.triage_prompt(assoc)), ("user", user)],
@@ -313,8 +318,8 @@ class GithubSource:
         comment = meta.get("feedback", "")
         user = (
             f"PR #{pr} for issue #{issue} in {repo}\n\n"
-            f"Issue title: {task.prompt}\n\n{meta.get('body') or ''}\n\n"
-            f"--- the human's comment ---\n{comment}"
+            f"{prompts.wrap_untrusted('ISSUE TEXT', task.prompt + chr(10) + chr(10) + (meta.get('body') or ''))}\n\n"
+            f"{prompts.wrap_untrusted('PR COMMENT', comment)}"
         )
         resp = await self.llm.ainvoke(
             [("system", prompts.classify_comment_prompt()), ("user", user)],
