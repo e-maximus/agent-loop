@@ -4,10 +4,12 @@ argv arrays only (no shell), so issue/prompt text can never be reinterpreted as
 shell when it flows into command arguments.
 
 Every git invocation here runs on the **host**, with credentials, against a
-checkout the agent has been writing to. So they all go through `_git()`, which
-disables hooks: `git commit` would otherwise execute `.git/hooks/pre-commit`
-from that checkout. tools.py refuses to write into `.git/`; this is the second
-lock on the same door, because a repo can also arrive with hooks already in it.
+checkout the agent has been writing to — so a repository that can name the
+commands git runs is a repository that runs commands as us. Both `_git()` and
+`_gh()` therefore take the hardened environment from `exec.git_env()`, and
+`_git()` additionally checks the checkout's config against the allowlist in
+git_integrity.py before acting on it. Nothing in this module calls `run()` for
+git or gh directly; that is the point, and tests/test_git_integrity.py asserts it.
 """
 
 from __future__ import annotations
@@ -17,7 +19,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from ..exec import run
+from ..exec import git_env, run
+from ..git_integrity import assert_safe_config
 from ..logging import create_logger
 
 log = create_logger("github")
@@ -68,14 +71,35 @@ class PullRequest:
     cross_repository: bool = False
 
 
-async def _git(args: list[str], *, cwd: str, throw_on_error: bool = True):
-    """git, with hooks from the target checkout disabled.
+async def _gh(args: list[str], *, cwd: str | None = None, throw_on_error: bool = True):
+    """gh, with the same hardened git environment as `_git`.
 
-    `core.hooksPath=/dev/null` is inherited by every hook lookup for this
-    invocation, so a `.git/hooks/pre-commit` left in the tree — by the agent, or
-    by whoever pushed to the repo — cannot run as us.
+    `gh` shells out to git for `repo clone`, `pr create` and pushes, and those
+    children get our environment but not our command line — so the hardening has
+    to travel as `GIT_CONFIG_*`, not as `-c`. Routing every gh call through here
+    rather than only the two that obviously spawn git is what keeps that true
+    when someone adds the third.
     """
-    return await run("git", ["-c", "core.hooksPath=/dev/null", *args], cwd=cwd, throw_on_error=throw_on_error)
+    return await run("gh", args, cwd=cwd, env=git_env(), throw_on_error=throw_on_error)
+
+
+async def _git(args: list[str], *, cwd: str, throw_on_error: bool = True):
+    """git in a target checkout: hardened environment, and a config we vouch for.
+
+    Two layers, because one of them was never enough. `git_env()` neutralises the
+    config keys we can name (`core.hooksPath`, `core.fsmonitor`, `ext::` URLs).
+    `assert_safe_config()` covers the ones we cannot: the set of config keys that
+    name a command git will execute is open-ended — `filter.<n>.clean` fires on
+    `git add`, bound by a `.gitattributes` the path-gate must let the agent write
+    — so the config is checked against an allowlist before we act on the
+    repository at all.
+
+    A checkout with no local config yet — the moment before `gh repo clone`
+    finishes — passes: `assert_safe_config` treats an unreadable config as
+    nothing to object to, not as a violation.
+    """
+    await assert_safe_config(cwd)
+    return await run("git", args, cwd=cwd, env=git_env(), throw_on_error=throw_on_error)
 
 
 def is_bot_comment(body: str) -> bool:
@@ -93,21 +117,19 @@ def _repo_dir_name(repo: str) -> str:
 
 
 async def is_authenticated() -> bool:
-    res = await run("gh", ["auth", "status"], throw_on_error=False)
+    res = await _gh(["auth", "status"], throw_on_error=False)
     return res.code == 0
 
 
 async def default_branch(repo: str) -> str:
-    res = await run(
-        "gh",
+    res = await _gh(
         ["repo", "view", repo, "--json", "defaultBranchRef", "--jq", ".defaultBranchRef.name"],
     )
     return res.stdout.strip() or "main"
 
 
 async def list_open_issues(repo: str) -> list[Issue]:
-    res = await run(
-        "gh",
+    res = await _gh(
         [
             "issue",
             "list",
@@ -139,8 +161,7 @@ async def issue_author_association(repo: str, issue: int) -> str:
     """Author's relationship to the repo (OWNER/MEMBER/COLLABORATOR/NONE/…).
     `gh issue list --json` does not expose it, so fetch it per issue only when
     the triage gate actually needs it. Falls back to NONE (the strictest case)."""
-    res = await run(
-        "gh",
+    res = await _gh(
         ["api", f"repos/{repo}/issues/{issue}", "--jq", ".author_association"],
         throw_on_error=False,
     )
@@ -148,8 +169,7 @@ async def issue_author_association(repo: str, issue: int) -> str:
 
 
 async def list_issue_comments(repo: str, issue: int) -> list[IssueComment]:
-    res = await run(
-        "gh",
+    res = await _gh(
         ["api", f"repos/{repo}/issues/{issue}/comments", "--paginate"],
         throw_on_error=False,
     )
@@ -175,8 +195,8 @@ async def ensure_clone(repo: str, clone_dir: str) -> str:
 
     if not os.path.exists(os.path.join(dest, ".git")):
         log.info(f"cloning {repo} → {dest}")
-        await run("gh", ["repo", "clone", repo, dest])
-    await run("gh", ["auth", "setup-git"], throw_on_error=False)
+        await _gh(["repo", "clone", repo, dest])
+    await _gh(["auth", "setup-git"], throw_on_error=False)
     await _git(["fetch", "origin", base], cwd=dest)
     await _git(["checkout", base], cwd=dest)
     await _git(["reset", "--hard", f"origin/{base}"], cwd=dest)
@@ -209,23 +229,21 @@ async def continue_branch(repo_path: str, branch: str, base: str) -> bool:
     else's commit. On False the checkout is left untouched for the caller to
     reset, and a half-finished merge is always aborted.
     """
-    fetched = await run("git", ["fetch", "origin", branch], cwd=repo_path, throw_on_error=False)
+    # Every call here goes through `_git`. These four used to be bare `run("git",
+    # …)`: the merge below carried the hook flag and the fetch and checkout next
+    # to it did not, so a `post-checkout` planted in a previous task on this
+    # checkout — they are reused per repo, forever — executed on the host at the
+    # start of the next one. That is the failure mode `_git` exists to make
+    # impossible rather than to remember.
+    fetched = await _git(["fetch", "origin", branch], cwd=repo_path, throw_on_error=False)
     if fetched.code != 0:
         log.info(f"branch {branch} is gone from origin — cannot continue it")
         return False
-    await run("git", ["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
+    await _git(["checkout", "-B", branch, f"origin/{branch}"], cwd=repo_path)
 
-    # `core.hooksPath=/dev/null`: this merge runs on the host, with credentials,
-    # in a checkout the agent has been writing to — a `post-merge` hook left
-    # there must not execute as us.
-    merged = await run(
-        "git",
-        ["-c", "core.hooksPath=/dev/null", "merge", "--no-edit", f"origin/{base}"],
-        cwd=repo_path,
-        throw_on_error=False,
-    )
+    merged = await _git(["merge", "--no-edit", f"origin/{base}"], cwd=repo_path, throw_on_error=False)
     if merged.code != 0:
-        await run("git", ["merge", "--abort"], cwd=repo_path, throw_on_error=False)
+        await _git(["merge", "--abort"], cwd=repo_path, throw_on_error=False)
         log.info(f"branch {branch} conflicts with {base} — cannot continue it")
         return False
     return True
@@ -249,8 +267,7 @@ async def find_open_pr(repo: str, branch: str) -> PullRequest | None:
     """The open PR whose head is `branch`, if there is one. GitHub — not the
     task DB — is the source of truth for whether an issue is already handled:
     the DB can be reset or lost, the PR cannot."""
-    res = await run(
-        "gh",
+    res = await _gh(
         [
             "pr",
             "list",
@@ -284,8 +301,7 @@ async def find_open_pr(repo: str, branch: str) -> PullRequest | None:
 async def open_pr(
     repo_path: str, *, base: str, title: str, body: str, repo: str = "", head: str = ""
 ) -> PullRequest:
-    res = await run(
-        "gh",
+    res = await _gh(
         ["pr", "create", "--base", base, "--title", title, "--body", body],
         cwd=repo_path,
         throw_on_error=False,
@@ -312,8 +328,7 @@ async def close_pr(repo: str, pr_number: int, comment: str) -> None:
     """Close a PR of ours that can no longer be continued, saying why in the
     thread. The branch is left alone: the next run force-pushes over it, and
     deleting it here would strip the closed PR of its diff."""
-    await run(
-        "gh",
+    await _gh(
         ["pr", "close", str(pr_number), "--repo", repo, "--comment", comment],
         throw_on_error=False,
     )
@@ -322,8 +337,7 @@ async def close_pr(repo: str, pr_number: int, comment: str) -> None:
 async def update_pr(repo: str, pr_number: int, *, title: str, body: str) -> None:
     """Refresh an adopted PR's title/body so it describes the run that just
     pushed to it, not the one that opened it."""
-    await run(
-        "gh",
+    await _gh(
         ["pr", "edit", str(pr_number), "--repo", repo, "--title", title, "--body", body],
         throw_on_error=False,
     )
@@ -335,8 +349,7 @@ ChecksState = str  # 'pending' | 'success' | 'failure' | 'none'
 
 async def pr_checks_state(repo: str, pr_number: int) -> ChecksState:
     """Roll up the PR's CI checks into a single state."""
-    res = await run(
-        "gh",
+    res = await _gh(
         ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
         throw_on_error=False,
     )
@@ -367,8 +380,7 @@ async def pr_failed_check_conclusions(repo: str, pr_number: int) -> list[str]:
     """Upper-cased conclusions of the PR's failing checks (FAILURE, CANCELLED, …).
     Lets the watcher tell a transient failure (cancelled/timed-out — worth one
     rerun) apart from a genuine build/test failure."""
-    res = await run(
-        "gh",
+    res = await _gh(
         ["pr", "view", str(pr_number), "--repo", repo, "--json", "statusCheckRollup"],
         throw_on_error=False,
     )
@@ -392,8 +404,7 @@ def failures_are_transient(conclusions: list[str]) -> bool:
 async def rerun_failed_runs(repo: str, branch: str) -> bool:
     """Re-run the failed jobs of the most recent workflow run on `branch`.
     Returns True if a rerun was triggered. Used at most once per PR."""
-    res = await run(
-        "gh",
+    res = await _gh(
         [
             "run",
             "list",
@@ -419,8 +430,7 @@ async def rerun_failed_runs(repo: str, branch: str) -> bool:
             continue
         conclusion = (r.get("conclusion") or "").upper()
         if conclusion in ("FAILURE", "CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"):
-            rr = await run(
-                "gh",
+            rr = await _gh(
                 ["run", "rerun", str(r["databaseId"]), "--repo", repo, "--failed"],
                 throw_on_error=False,
             )
@@ -437,7 +447,7 @@ async def pr_comments(repo: str, pr_number: int) -> list[IssueComment]:
     out: list[IssueComment] = []
 
     async def _collect(api_path: str, ts_field: str, inline: bool = False) -> None:
-        res = await run("gh", ["api", api_path, "--paginate"], throw_on_error=False)
+        res = await _gh(["api", api_path, "--paginate"], throw_on_error=False)
         if res.code != 0:
             return
         for c in json.loads(res.stdout or "[]"):
@@ -465,8 +475,7 @@ async def pr_comments(repo: str, pr_number: int) -> list[IssueComment]:
 
 
 async def comment_pr(repo: str, pr_number: int, body: str) -> None:
-    await run(
-        "gh",
+    await _gh(
         ["pr", "comment", str(pr_number), "--repo", repo, "--body", body],
         throw_on_error=False,
     )
@@ -477,8 +486,7 @@ async def pr_review_decision(repo: str, pr_number: int) -> str:
     reviewer (GitHub's own review-gating rule: a reviewer's most recent review
     supersedes their earlier ones). 'changes_requested' wins over 'approved' so
     an outstanding block is never merged over."""
-    res = await run(
-        "gh",
+    res = await _gh(
         ["api", f"repos/{repo}/pulls/{pr_number}/reviews", "--paginate"],
         throw_on_error=False,
     )
@@ -498,8 +506,7 @@ async def pr_review_decision(repo: str, pr_number: int) -> str:
 
 
 async def pr_labels(repo: str, pr_number: int) -> list[str]:
-    res = await run(
-        "gh",
+    res = await _gh(
         ["pr", "view", str(pr_number), "--repo", repo, "--json", "labels"],
         throw_on_error=False,
     )
@@ -510,7 +517,7 @@ async def pr_labels(repo: str, pr_number: int) -> list[str]:
 
 
 async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
-    res = await run("gh", ["pr", "view", str(pr_number), "--repo", repo, "--json", "files"])
+    res = await _gh(["pr", "view", str(pr_number), "--repo", repo, "--json", "files"])
     data = json.loads(res.stdout or "{}")
     return [
         ChangedFile(file=f["path"], added=f.get("additions", 0), deleted=f.get("deletions", 0))
@@ -519,12 +526,11 @@ async def pr_changed_files(repo: str, pr_number: int) -> list[ChangedFile]:
 
 
 async def merge_pr(repo: str, pr_number: int) -> None:
-    await run("gh", ["pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch"])
+    await _gh(["pr", "merge", str(pr_number), "--repo", repo, "--squash", "--delete-branch"])
 
 
 async def comment_issue(repo: str, issue: int, body: str) -> None:
-    await run(
-        "gh",
+    await _gh(
         ["issue", "comment", str(issue), "--repo", repo, "--body", body],
         throw_on_error=False,
     )

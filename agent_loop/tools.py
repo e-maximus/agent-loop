@@ -58,7 +58,11 @@ def _resolve_in(repo_path: str, p: str) -> str:
     if resolved != root and not resolved.startswith(root + os.sep):
         raise PathEscape(f"Path {p} escapes the repo checkout.")
     rel_parts = Path(resolved).relative_to(root).parts if resolved != root else ()
-    if rel_parts and rel_parts[0] in _PROTECTED_DIRS:
+    # casefold, because the machine this runs on is macOS and APFS is
+    # case-insensitive by default: `realpath` does not normalise case, so a
+    # write to `.GIT/config` passed a `== ".git"` test and landed in `.git/config`
+    # all the same.
+    if rel_parts and rel_parts[0].casefold() in _PROTECTED_DIRS:
         raise PathEscape(
             f"Path {p} is inside {rel_parts[0]}/, which tools may not touch "
             "(git runs hooks from there on the host)."

@@ -5,10 +5,16 @@ run inside an ephemeral per-task Docker container with the checkout bind-mounted
 at /workspace. When it doesn't, the same commands run on the host. File tools
 (Read/Write/Edit/Grep/Glob) always operate on the host filesystem (the mount),
 so only shell execution differs between the two modes.
+
+The checkout's `.git` is mounted a second time, read-only, on top: the path-gate
+guards the file tools but not the container's shell, and a writable `.git` in the
+mount is host code execution rather than a file write — git executes what its own
+config names, and the pipeline runs git on the host between agent steps.
 """
 
 from __future__ import annotations
 
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -73,6 +79,15 @@ async def task_container(repo_path: str, cfg: ContainerConfig | None) -> AsyncIt
             "/workspace",
             "--mount",
             f"type=bind,src={repo_path},dst=/workspace",
+            # `.git` again, read-only, layered over the writable checkout. The
+            # container's shell is not covered by the path-gate, so without this
+            # the agent could write `.git/config` in the mount and the next
+            # host-side `git status` — `has_changes`, seconds later, in
+            # `implement` — would execute what it named. Read-only keeps the
+            # reads the pipeline depends on (`git diff HEAD` in critic, security
+            # and summarize all run in here) while removing that write.
+            "--mount",
+            f"type=bind,src={os.path.join(repo_path, '.git')},dst=/workspace/.git,readonly",
             cfg.image,
             "sleep",
             "infinity",
